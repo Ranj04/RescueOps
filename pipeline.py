@@ -1,19 +1,22 @@
-"""Incident response pipeline — the integration seam between Track A agents and Track B.
+"""Incident response pipeline — CrewAI Flow orchestrating the sequential crew.
 
 Public API (Track B builds against this signature):
     run_incident(incident_id, chaos_config=None, approval_callback=None) -> RunResult
 
-Phase A2: triage + diagnosis use real CrewAI agents via the TrueFoundry gateway.
-          Remediation / Verification / Postmortem remain stubbed (A3+).
+Uses CrewAI Flows for event-driven orchestration with state management.
+Each pipeline stage is a Flow step connected via @start() / @listen().
+The Crew (triage + diagnosis agents) runs inside the diagnose step.
 """
 from __future__ import annotations
 
 import json
 import uuid
 from collections.abc import Callable
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from crewai import Crew, Process, Task
+from crewai.flow.flow import Flow, listen, start
+from pydantic import BaseModel, Field
 
 from agents import build_diagnosis_agent, build_triage_agent
 from incidents import get_incident, observable
@@ -32,13 +35,13 @@ from schemas import (
 # Optional Track-B dependencies — no-op if not yet available
 # ---------------------------------------------------------------------------
 try:
-    from audit import log_event as _log_event  # type: ignore[import-not-found]
+    from audit import log_event as _log_event
     _AUDIT_AVAILABLE = True
 except ImportError:
     _AUDIT_AVAILABLE = False
 
 try:
-    from chaos import apply_chaos as _apply_chaos  # type: ignore[import-not-found]
+    from chaos import apply_chaos as _apply_chaos
     _CHAOS_AVAILABLE = True
 except ImportError:
     _CHAOS_AVAILABLE = False
@@ -51,7 +54,6 @@ def _log(run_id: str, stage: str, payload: dict) -> None:
 
 # ---------------------------------------------------------------------------
 # Confidence computed deterministically from telemetry coverage (never by LLM)
-# Weights: logs -0.30 | metrics -0.40 | deploys -0.20
 # ---------------------------------------------------------------------------
 def _compute_confidence(telemetry: dict) -> Tuple[float, str]:
     confidence = 1.0
@@ -145,7 +147,169 @@ _STUB_POSTMORTEM = PostmortemReport(
 
 
 # ---------------------------------------------------------------------------
-# Public pipeline entrypoint
+# Flow state — persists data across all pipeline steps
+# ---------------------------------------------------------------------------
+class IncidentFlowState(BaseModel):
+    run_id: str = ""
+    incident_id: str = ""
+    chaos_config: Optional[Dict[str, Any]] = None
+    obs: dict = Field(default_factory=dict)
+    confidence: float = 1.0
+    coverage_note: str = ""
+    triage: Optional[Dict[str, Any]] = None
+    diagnosis: Optional[Dict[str, Any]] = None
+    remediation: Optional[Dict[str, Any]] = None
+    approval: Optional[Dict[str, Any]] = None
+    verification: Optional[Dict[str, Any]] = None
+    postmortem: Optional[Dict[str, Any]] = None
+
+
+# ---------------------------------------------------------------------------
+# CrewAI Flow — event-driven pipeline orchestration
+# ---------------------------------------------------------------------------
+class IncidentResponseFlow(Flow[IncidentFlowState]):
+    """Flow-based incident response pipeline.
+
+    Each step is an event-driven node connected via @start/@listen.
+    The Crew (triage + diagnosis agents) runs inside the diagnose step.
+    State is managed by Pydantic across all steps.
+    """
+
+    def __init__(self, approval_callback=None, **kwargs):
+        super().__init__(**kwargs)
+        self._approval_callback = approval_callback
+
+    # Step 1: Load incident data and apply chaos
+    @start()
+    def load_and_prepare(self):
+        incident = get_incident(self.state.incident_id)
+        obs = observable(incident)
+
+        if _CHAOS_AVAILABLE and self.state.chaos_config:
+            try:
+                obs = _apply_chaos(obs, self.state.chaos_config)
+            except Exception:
+                pass
+
+        self.state.obs = obs
+        confidence, coverage_note = _compute_confidence(obs["telemetry"])
+        self.state.confidence = confidence
+        self.state.coverage_note = coverage_note
+
+        _log(self.state.run_id, "start", {
+            "incident_id": self.state.incident_id,
+            "chaos_config": self.state.chaos_config,
+        })
+        return "prepared"
+
+    # Step 2: Run triage + diagnosis crew
+    @listen(load_and_prepare)
+    def run_crew(self, _):
+        triage_agent = build_triage_agent()
+        diagnosis_agent = build_diagnosis_agent()
+
+        triage_task = Task(
+            description=_triage_prompt(self.state.obs),
+            expected_output="Structured triage report classifying this incident.",
+            agent=triage_agent,
+            output_pydantic=TriageReport,
+        )
+
+        diagnosis_task = Task(
+            description=_diagnosis_prompt(
+                self.state.obs, self.state.confidence, self.state.coverage_note
+            ),
+            expected_output="Structured diagnosis report identifying the root cause.",
+            agent=diagnosis_agent,
+            output_pydantic=DiagnosisReport,
+            context=[triage_task],
+        )
+
+        result = Crew(
+            agents=[triage_agent, diagnosis_agent],
+            tasks=[triage_task, diagnosis_task],
+            process=Process.sequential,
+            verbose=True,
+        ).kickoff()
+
+        # Extract pydantic outputs with fallbacks
+        triage: TriageReport = (
+            getattr(result.tasks_output[0], "pydantic", None)
+            or TriageReport(
+                severity="SEV-2",
+                customer_facing=True,
+                summary="(parse error — see crew logs)",
+                route_to="Diagnosis",
+                reason="parse error",
+            )
+        )
+
+        raw_diag: DiagnosisReport = (
+            getattr(result.tasks_output[1], "pydantic", None)
+            or DiagnosisReport(
+                root_cause="(parse error — see crew logs)",
+                cited_evidence=[],
+                confidence=self.state.confidence,
+                reasoning="parse error",
+            )
+        )
+
+        # Override confidence with deterministic pipeline value
+        diagnosis = raw_diag.model_copy(update={"confidence": self.state.confidence})
+
+        self.state.triage = triage.model_dump()
+        self.state.diagnosis = diagnosis.model_dump()
+
+        _log(self.state.run_id, "triage", self.state.triage)
+        _log(self.state.run_id, "diagnosis", self.state.diagnosis)
+        return "crew_done"
+
+    # Step 3: Remediation plan (stubbed for A3+)
+    @listen(run_crew)
+    def remediate(self, _):
+        plan = _STUB_PLAN
+        self.state.remediation = plan.model_dump()
+        _log(self.state.run_id, "remediation_plan", self.state.remediation)
+        return "remediation_done"
+
+    # Step 4: Human-in-the-loop approval gate
+    @listen(remediate)
+    def approve(self, _):
+        plan = RemediationPlan(**self.state.remediation)
+
+        if self._approval_callback is not None:
+            decision = self._approval_callback(plan)
+        else:
+            decision = ApprovalDecision(
+                approved=True,
+                approver="auto-cli",
+                note="No approval_callback supplied; auto-approved per README contract",
+            )
+
+        self.state.approval = decision.model_dump()
+        _log(self.state.run_id, "approval", self.state.approval)
+        return "approval_done"
+
+    # Step 5: Verification (stubbed for A3+)
+    @listen(approve)
+    def verify(self, _):
+        verification = _STUB_VERIFICATION
+        self.state.verification = verification.model_dump()
+        _log(self.state.run_id, "verification", self.state.verification)
+        return "verification_done"
+
+    # Step 6: Postmortem (stubbed for A3+)
+    @listen(verify)
+    def write_postmortem(self, _):
+        postmortem = _STUB_POSTMORTEM
+        self.state.postmortem = postmortem.model_dump()
+        _log(self.state.run_id, "postmortem", self.state.postmortem)
+        _log(self.state.run_id, "complete", {"recovered": _STUB_VERIFICATION.recovered})
+        return "complete"
+
+
+# ---------------------------------------------------------------------------
+# Public pipeline entrypoint — same signature, now powered by Flow
 # ---------------------------------------------------------------------------
 def run_incident(
     incident_id: str,
@@ -154,114 +318,27 @@ def run_incident(
 ) -> RunResult:
     """Run the full incident-response pipeline for a given incident.
 
-    Args:
-        incident_id:       ID from incidents.json (e.g. "INC-001-checkout-db-pool").
-        chaos_config:      Optional chaos parameters injected by Track B before agents see data.
-        approval_callback: Called with the RemediationPlan; must return ApprovalDecision.
-                           If None, pipeline auto-approves (README contract: useful for CLI testing).
+    Internally uses a CrewAI Flow for event-driven orchestration.
+    The public signature is unchanged — Track B code works without modification.
     """
     run_id = str(uuid.uuid4())
 
-    # Load observable slice — agents never see ground_truth
-    incident = get_incident(incident_id)
-    obs = observable(incident)
+    flow = IncidentResponseFlow(approval_callback=approval_callback)
+    flow.state.run_id = run_id
+    flow.state.incident_id = incident_id
+    flow.state.chaos_config = chaos_config
 
-    # Apply chaos before agents see data (Track B's chaos.py; passthrough until available)
-    if _CHAOS_AVAILABLE and chaos_config:
-        try:
-            obs = _apply_chaos(obs, chaos_config)
-        except Exception:
-            pass  # chaos.py not yet compatible; proceed with clean obs
+    flow.kickoff()
 
-    _log(run_id, "start", {"incident_id": incident_id, "chaos_config": chaos_config})
-
-    # Confidence is computed here, not by the LLM
-    confidence, coverage_note = _compute_confidence(obs["telemetry"])
-
-    # --- A2: Real triage + diagnosis agents ---
-    triage_agent = build_triage_agent()
-    diagnosis_agent = build_diagnosis_agent()
-
-    triage_task = Task(
-        description=_triage_prompt(obs),
-        expected_output="Structured triage report classifying this incident.",
-        agent=triage_agent,
-        output_pydantic=TriageReport,
-    )
-
-    diagnosis_task = Task(
-        description=_diagnosis_prompt(obs, confidence, coverage_note),
-        expected_output="Structured diagnosis report identifying the root cause.",
-        agent=diagnosis_agent,
-        output_pydantic=DiagnosisReport,
-        context=[triage_task],
-    )
-
-    result = Crew(
-        agents=[triage_agent, diagnosis_agent],
-        tasks=[triage_task, diagnosis_task],
-        process=Process.sequential,
-        verbose=True,
-    ).kickoff()
-
-    # Extract pydantic outputs; fall back to stubs if the LLM response can't be parsed
-    triage: TriageReport = (
-        getattr(result.tasks_output[0], "pydantic", None)
-        or TriageReport(
-            severity="SEV-2",
-            customer_facing=True,
-            summary="(parse error — see crew logs)",
-            route_to="Diagnosis",
-            reason="parse error",
-        )
-    )
-
-    raw_diag: DiagnosisReport = (
-        getattr(result.tasks_output[1], "pydantic", None)
-        or DiagnosisReport(
-            root_cause="(parse error — see crew logs)",
-            cited_evidence=[],
-            confidence=confidence,
-            reasoning="parse error",
-        )
-    )
-
-    # Always override confidence with the deterministic pipeline value
-    diagnosis = raw_diag.model_copy(update={"confidence": confidence})
-
-    _log(run_id, "triage", triage.model_dump())
-    _log(run_id, "diagnosis", diagnosis.model_dump())
-
-    # --- A3+ stubs: Remediation / Approval / Verification / Postmortem ---
-    plan = _STUB_PLAN
-    _log(run_id, "remediation_plan", plan.model_dump())
-
-    if approval_callback is not None:
-        decision = approval_callback(plan)
-    else:
-        decision = ApprovalDecision(
-            approved=True,
-            approver="auto-cli",
-            note="No approval_callback supplied; auto-approved per README contract",
-        )
-    _log(run_id, "approval", decision.model_dump())
-
-    verification = _STUB_VERIFICATION
-    _log(run_id, "verification", verification.model_dump())
-
-    postmortem = _STUB_POSTMORTEM
-    _log(run_id, "postmortem", postmortem.model_dump())
-
-    _log(run_id, "complete", {"recovered": verification.recovered})
-
+    # Reconstruct RunResult from flow state
     return RunResult(
         run_id=run_id,
         incident_id=incident_id,
-        triage=triage,
-        diagnosis=diagnosis,
-        remediation=plan,
-        approval=decision,
-        verification=verification,
-        postmortem=postmortem,
+        triage=TriageReport(**flow.state.triage),
+        diagnosis=DiagnosisReport(**flow.state.diagnosis),
+        remediation=RemediationPlan(**flow.state.remediation),
+        approval=ApprovalDecision(**flow.state.approval),
+        verification=VerificationReport(**flow.state.verification),
+        postmortem=PostmortemReport(**flow.state.postmortem),
         chaos_config=chaos_config,
     )

@@ -4,6 +4,10 @@
 # Secrets
 .env
 
+# Agent/editor skills (installed via npx skills add; not project code)
+.agents/
+.claude/skills/
+
 # Python
 __pycache__/
 *.py[cod]

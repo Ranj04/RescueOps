@@ -4,6 +4,8 @@
 
 See [`KICKOFF-TRANSCRIPT.md`](KICKOFF-TRANSCRIPT.md) for the full verbatim kickoff transcript (agenda, TrueFoundry/CrewAI talks, rules, judging criteria, and prizes).
 
+See [`CREWAI-DOCS.md`](CREWAI-DOCS.md) for a comprehensive CrewAI reference (agents, crews, flows, tools, MCP, observability).
+
 ---
 
 ## Overview
@@ -84,6 +86,7 @@ Every LLM call routes through the **TrueFoundry AI Gateway** (Grok primary; Clau
 | `app.py` | Streamlit UI — incident picker, artifacts, chaos console, eval | **Track B** |
 | `requirements.txt` | Python dependencies | Both update as needed |
 | `KICKOFF-TRANSCRIPT.md` | Verbatim hackathon kickoff transcript | Reference |
+| `CREWAI-DOCS.md` | Comprehensive CrewAI documentation reference | Reference |
 
 **Rule:** never edit a file the other track owns. If a contract change in `schemas.py` is needed, both teammates agree before A edits it.
 
