@@ -14,6 +14,7 @@ import streamlit as st
 import audit
 import evaluation
 import incidents
+import voice
 from pipeline import run_incident
 from schemas import ApprovalDecision, RemediationPlan
 
@@ -68,7 +69,7 @@ def _render_diagnosis(d, chaos_config) -> None:
         st.write(d.reasoning)
 
 
-def _render_remediation(plan, decision) -> None:
+def _render_remediation(plan, decision, diagnosis=None) -> None:
     st.subheader("3 · Remediation")
     col_safe, col_risky = st.columns(2)
     with col_safe:
@@ -86,6 +87,12 @@ def _render_remediation(plan, decision) -> None:
         st.success(f"Risky actions APPROVED by {decision.approver} — {decision.note}")
     else:
         st.warning(f"Risky actions HELD by {decision.approver} — {decision.note}")
+
+    # Optional voice augmentation — the approval decision above is the source of
+    # truth; this only reads the prompt aloud and never blocks the flow.
+    if st.session_state.get("voice_enabled") and diagnosis is not None and voice.available():
+        if st.button("Speak diagnosis + approval prompt"):
+            voice.speak(voice.approval_prompt(diagnosis.root_cause, len(plan.risky)))
 
 
 def _render_verification(v) -> None:
@@ -117,7 +124,7 @@ def _render_timeline(result, chaos_config) -> None:
     st.divider()
     _render_diagnosis(result.diagnosis, chaos_config)
     st.divider()
-    _render_remediation(result.remediation, result.approval)
+    _render_remediation(result.remediation, result.approval, result.diagnosis)
     st.divider()
     _render_verification(result.verification)
     st.divider()
@@ -210,6 +217,11 @@ def main() -> None:
             options=[False, True],
             format_func=lambda v: "Approve (allow risky)" if v else "Deny (hold risky)",
             index=0,
+        )
+        st.session_state["voice_enabled"] = st.checkbox(
+            "Enable voice narration (optional)",
+            value=False,
+            help="Reads the approval prompt aloud. The approval button is always the primary control.",
         )
 
         if st.button("Run incident", type="primary"):
