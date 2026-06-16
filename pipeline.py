@@ -3,9 +3,9 @@
 Public API (Track B builds against this signature):
     run_incident(incident_id, chaos_config=None, approval_callback=None) -> RunResult
 
-Uses CrewAI Flows for event-driven orchestration with state management.
-Each pipeline stage is a Flow step connected via @start() / @listen().
-The Crew (triage + diagnosis agents) runs inside the diagnose step.
+Phase A3: triage + diagnosis + remediation use real CrewAI agents.
+          Approval gate wired to caller-supplied callback.
+          Verification / Postmortem remain stubbed (A4).
 """
 from __future__ import annotations
 
@@ -95,6 +95,76 @@ def _triage_prompt(obs: dict) -> str:
     )
 
 
+def _verification_prompt(obs: dict, diagnosis: dict, remediation: dict, approval: dict) -> str:
+    alert = obs.get("alert", "")
+    metrics = obs.get("telemetry", {}).get("metrics", {})
+    approved = approval.get("approved", False)
+    risky_note = (
+        f"  Risky actions (approved + executed): {json.dumps(remediation.get('risky', []))}"
+        if approved
+        else "  Risky actions: NOT executed (approval was denied)"
+    )
+    return (
+        "Remediation has been applied. Assess whether the incident has recovered.\n\n"
+        f"ORIGINAL ALERT: {alert}\n\n"
+        f"METRICS AT TIME OF INCIDENT:\n{json.dumps(metrics, indent=2)}\n\n"
+        f"DIAGNOSIS ROOT CAUSE: {diagnosis.get('root_cause', 'unknown')}\n\n"
+        f"APPROVAL: {'APPROVED' if approved else 'DENIED'} by {approval.get('approver', 'unknown')}\n\n"
+        "REMEDIATION APPLIED:\n"
+        f"  Safe actions (always executed): {json.dumps(remediation.get('safe', []))}\n"
+        f"{risky_note}\n\n"
+        "Reason about whether the applied actions directly address the root cause.\n"
+        "Identify the primary alerting metric from the alert and metrics above.\n\n"
+        "Output:\n"
+        "  recovered     — true if the applied actions resolve the root cause\n"
+        "  metric_name   — the primary metric that was alerting (e.g. checkout_error_rate)\n"
+        "  threshold     — the alert threshold for that metric (infer from the alert message)\n"
+        "  observed_value — estimated post-remediation value (below threshold if recovered)\n"
+        "  note          — one sentence explaining your recovery assessment"
+    )
+
+
+def _postmortem_prompt(
+    triage: dict, diagnosis: dict, remediation: dict, approval: dict, verification: dict
+) -> str:
+    return (
+        "Write a blameless postmortem for this incident.\n\n"
+        f"TRIAGE:\n{json.dumps(triage, indent=2)}\n\n"
+        f"DIAGNOSIS:\n{json.dumps(diagnosis, indent=2)}\n\n"
+        f"REMEDIATION PLAN:\n{json.dumps(remediation, indent=2)}\n\n"
+        f"APPROVAL:\n{json.dumps(approval, indent=2)}\n\n"
+        f"VERIFICATION:\n{json.dumps(verification, indent=2)}\n\n"
+        "Output requirements:\n"
+        "  summary      — 2-3 sentence executive summary: what broke, why, how it was fixed\n"
+        "  timeline     — ordered list of key events; use 't+Xmin' format if exact times unknown\n"
+        "  root_cause   — one precise sentence confirming the root cause\n"
+        "  actions_taken — list of remediation steps that were actually executed\n"
+        "  follow_ups   — concrete, specific action items (no generic advice); "
+        "each item should be a real ticket or task"
+    )
+
+
+def _remediation_prompt(obs: dict, diagnosis: dict) -> str:
+    return (
+        "The diagnosis is complete. Produce a concrete remediation plan.\n\n"
+        f"OBSERVABLE INCIDENT DATA:\n{json.dumps(obs, indent=2)}\n\n"
+        "DIAGNOSIS:\n"
+        f"  root_cause: {diagnosis.get('root_cause', 'unknown')}\n"
+        f"  confidence: {diagnosis.get('confidence', 0):.2f}\n"
+        f"  cited_evidence: {json.dumps(diagnosis.get('cited_evidence', []))}\n"
+        f"  reasoning: {diagnosis.get('reasoning', '')}\n\n"
+        "Produce a RemediationPlan with two lists:\n"
+        "  safe  — non-destructive actions (destructive=false): config changes, traffic shifts, "
+        "scale-ups. Can be applied immediately without approval.\n"
+        "  risky — destructive actions (destructive=true): rollbacks, restarts, data deletions. "
+        "These require human approval before execution.\n\n"
+        "Rules:\n"
+        "  - Be specific: name exact flags, services, and values — no generic advice\n"
+        "  - Aim for 1-3 safe actions and 1-2 risky actions\n"
+        "  - Set destructive=false for every action in safe, destructive=true for every action in risky"
+    )
+
+
 def _diagnosis_prompt(obs: dict, confidence: float, coverage_note: str) -> str:
     return (
         "The Triage Engineer has classified this incident — see context above. "
@@ -127,6 +197,7 @@ def _remediation_prompt(obs: dict, diagnosis: dict) -> str:
         "Prefer the least-destructive action that fixes the root cause. Every action must be specific "
         "to THIS incident — no generic boilerplate."
     )
+
 
 
 def _verification_prompt(obs: dict, diagnosis: dict, remediation: dict, approval: dict) -> str:
@@ -361,7 +432,6 @@ class IncidentResponseFlow(Flow[IncidentFlowState]):
             "A remediation plan with safe[] and risky[] actions addressing the root cause.",
             RemediationPlan,
         ) or _fallback_plan()
-
         self.state.remediation = plan.model_dump()
         _log(self.state.run_id, "remediation_plan", self.state.remediation)
         return "remediation_done"
@@ -396,7 +466,6 @@ class IncidentResponseFlow(Flow[IncidentFlowState]):
             "A verification report stating the recovery metric, threshold, projected value, and recovered flag.",
             VerificationReport,
         ) or _fallback_verification()
-
         self.state.verification = verification.model_dump()
         _log(self.state.run_id, "verification", self.state.verification)
         return "verification_done"
