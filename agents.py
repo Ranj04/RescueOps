@@ -2,13 +2,15 @@
 
 Each function returns a fully-configured Agent. Agents are cheap to construct;
 build them fresh per run so there's no shared state between incidents.
+
+Pass model_id to override the default model (used for chaos fallback).
 """
 from crewai import Agent
 
 from config import build_llm
 
 
-def build_triage_agent() -> Agent:
+def build_triage_agent(model_id: str | None = None) -> Agent:
     return Agent(
         role="Incident Triage Engineer",
         goal=(
@@ -20,12 +22,12 @@ def build_triage_agent() -> Agent:
             "Decisive and calm under pressure. You assess customer impact quickly from partial data. "
             "When in doubt about severity, you go higher — false escalations cost less than slow responses."
         ),
-        llm=build_llm(),
+        llm=build_llm(model_id=model_id),
         verbose=True,
     )
 
 
-def build_diagnosis_agent() -> Agent:
+def build_diagnosis_agent(model_id: str | None = None) -> Agent:
     return Agent(
         role="Site Reliability Engineer — Root Cause Analyst",
         goal=(
@@ -39,6 +41,6 @@ def build_diagnosis_agent() -> Agent:
             "You know that correlation + timing + multiple telemetry signals pointing the same direction "
             "is strong evidence for causation."
         ),
-        llm=build_llm(),
+        llm=build_llm(model_id=model_id),
         verbose=True,
     )

@@ -19,6 +19,7 @@ from crewai.flow.flow import Flow, listen, start
 from pydantic import BaseModel, Field
 
 from agents import build_diagnosis_agent, build_triage_agent
+from config import CLAUDE_MODEL_ID
 from incidents import get_incident, observable
 from schemas import (
     ApprovalDecision,
@@ -205,8 +206,13 @@ class IncidentResponseFlow(Flow[IncidentFlowState]):
     # Step 2: Run triage + diagnosis crew
     @listen(load_and_prepare)
     def run_crew(self, _):
-        triage_agent = build_triage_agent()
-        diagnosis_agent = build_diagnosis_agent()
+        # If chaos broke the primary model, fall back to Claude via the gateway
+        fallback = None
+        if self.state.chaos_config and self.state.chaos_config.get("break_primary_model"):
+            fallback = CLAUDE_MODEL_ID
+
+        triage_agent = build_triage_agent(model_id=fallback)
+        diagnosis_agent = build_diagnosis_agent(model_id=fallback)
 
         triage_task = Task(
             description=_triage_prompt(self.state.obs),
