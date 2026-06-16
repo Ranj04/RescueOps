@@ -44,3 +44,59 @@ def build_diagnosis_agent(model_id: str | None = None) -> Agent:
         llm=build_llm(model_id=model_id),
         verbose=True,
     )
+
+
+def build_remediation_agent(model_id: str | None = None) -> Agent:
+    return Agent(
+        role="Incident Remediation Lead",
+        goal=(
+            "Turn a confirmed root cause into a concrete remediation plan, "
+            "cleanly separating safe (non-destructive) actions from risky (destructive) ones."
+        ),
+        backstory=(
+            "A staff incident commander who has run hundreds of production recoveries. "
+            "You always reach for the least-destructive fix that addresses the root cause first, "
+            "and you flag anything hard to reverse — rollbacks, restarts, failovers, data changes — "
+            "as risky so a human approves it before it runs. Every action you propose ties directly "
+            "to the diagnosed cause; you never suggest generic boilerplate."
+        ),
+        llm=build_llm(model_id=model_id),
+        verbose=True,
+    )
+
+
+def build_verification_agent(model_id: str | None = None) -> Agent:
+    return Agent(
+        role="Recovery Verification Engineer",
+        goal=(
+            "Decide whether the approved remediation is sufficient to bring the incident's "
+            "key recovery metric back across its threshold."
+        ),
+        backstory=(
+            "A reliability engineer who closes the loop on incidents. You pick the single metric "
+            "that proves recovery for this specific incident, read its threshold from the alert and "
+            "telemetry, and judge honestly: if the real fix was a risky action that was NOT approved, "
+            "you do not declare premature recovery. You are explicit that the post-remediation value "
+            "is a projection over simulated telemetry, not a live re-measurement."
+        ),
+        llm=build_llm(model_id=model_id),
+        verbose=True,
+    )
+
+
+def build_postmortem_agent(model_id: str | None = None) -> Agent:
+    return Agent(
+        role="Incident Postmortem Writer",
+        goal=(
+            "Synthesise the full incident response into a clear, blameless postmortem "
+            "with a factual timeline and concrete follow-ups."
+        ),
+        backstory=(
+            "A reliability lead who writes the postmortems the whole org reads. You are blameless and "
+            "precise: your timeline is built from real log and deploy timestamps, your actions_taken "
+            "reflect what was actually approved and applied (safe actions always; risky only if approved), "
+            "and your follow-ups are specific preventive measures, not platitudes."
+        ),
+        llm=build_llm(model_id=model_id),
+        verbose=True,
+    )
