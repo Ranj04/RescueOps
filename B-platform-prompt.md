@@ -20,6 +20,25 @@ one. Build everything against that stub by importing `from pipeline import run_i
 A swaps in real agents, your UI/eval keep working unchanged. Do not edit the pipeline to make your
 life easier; if you need a contract change, ask A to make it in `schemas.py`.
 
+## What the hackathon is judged on (from `KICKOFF-TRANSCRIPT.md`)
+The brief: build an agentic AI solution that **uses both TrueFoundry and CrewAI** and is **production-ready, not just demo-ready** (secure, scalable, deployable). Track B owns most of the production-readiness story. Map your work to the official rubric:
+
+| Criterion | Points | How Track B earns it |
+|---|---|---|
+| Problem & use case | 20 | Real-world incident-response framing in `app.py` (clear problem, clear user) |
+| Technical execution | 25 | Clean chaos/audit/eval/UI wiring; every LLM call provably routes through the TrueFoundry gateway |
+| Innovation & creativity | 20 | Live chaos injection + computed-confidence drop; optional voice approval (B5) |
+| **Production readiness** | **20** | **Reliability (model fallback + chaos), governance (human-in-the-loop approval, audit log), evaluation harness, observability** |
+| Demo & presentation | 15 | The 4-beat live demo (see README) + a crisp "path to production" narrative |
+
+Governance/safe-deployment themes the sponsors stressed (surface these where natural):
+- **Reliability / failover** — `break_primary_model` should visibly trigger the gateway's fallback (TrueFoundry Traces show the model switch).
+- **Human-in-the-loop** — the approval gate is governance, not just a yes/no; it lets a human *block* a risky action before it runs.
+- **Observability** — the SQLite audit log is your trace of every stage; mention TrueFoundry/CrewAI tracing as the production equivalent.
+- **Guardrails** — TrueFoundry guardrails (PII/secret/toxicity scrubbing) are configured at the gateway, not in your code. Be ready to *point to* them in the demo as the safe-deployment layer; do not reimplement guardrails in Track B.
+
+Deliverable per the brief: a working demo **plus** a clear explanation of the problem, the solution, the approach, and the **path to production**.
+
 ## Critical technical facts (from README)
 - **Chaos lives here.** `chaos.apply_chaos(observable, chaos_config) -> observable` removes disabled telemetry sources. Track A calls it inside `run_incident`. `chaos_config = {"disable_sources": [...], "break_primary_model": bool}`.
 - **Audit log is SQLite** (stdlib `sqlite3`), append-only. `audit.init_db()`, `audit.log_event(run_id, stage, payload)`, `audit.get_run(run_id)`.
@@ -42,9 +61,10 @@ life easier; if you need a contract change, ask A to make it in `schemas.py`.
 - Verify gate: pick INC-001, see all artifacts render, approve/reject a risky action and see it reflected + logged via `audit`.
 
 **B4 — Chaos console + eval dashboard (the two judge moments)**
-- Chaos console: toggles for each telemetry source + a "break primary model" control, wired into `chaos_config` for the next run.
+- Chaos console: toggles for each telemetry source + a "break primary model" control, wired into `chaos_config` for the next run. The "break primary model" toggle is the reliability story — it should make the TrueFoundry gateway fail over to a fallback model (visible in Traces).
 - Eval dashboard: render `evaluate_all()` results — accuracy, time, confidence, classification, fallback success.
 - Verify gate: toggling a source off and re-running visibly drops confidence and still completes; the eval dashboard renders the metrics. These two must be rock-solid — protect them above everything.
+- Presentation aid (for the 6:30–7:30 live demo): the UI should make the production-readiness story self-evident — reliability (chaos + fallback), governance (approval gate + audit log), and measured evaluation. Keep a short, on-screen "path to production" note (e.g., real telemetry sources, gateway guardrails, deploy target) so the judges' demo/presentation points are easy to award.
 
 **B5 — OPTIONAL stretch: voice approval (ONLY if B1–B4 are all green and there's real time)**
 - Add `voice.py`: `speak(text)` via Grok TTS (called directly against the xAI API, not the gateway). Read out the diagnosis summary + the approval prompt at the approval step. Optionally `listen()` via Grok STT for spoken "approve"/"reject".

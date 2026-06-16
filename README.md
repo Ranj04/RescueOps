@@ -2,6 +2,8 @@
 
 **A resilient, self-evaluating AI incident first responder** — built for Capgemini AIE × CrewAI hackathon, judged on production-readiness.
 
+See [`KICKOFF-TRANSCRIPT.md`](KICKOFF-TRANSCRIPT.md) for the full verbatim kickoff transcript (agenda, TrueFoundry/CrewAI talks, rules, judging criteria, and prizes).
+
 ---
 
 ## Overview
@@ -81,6 +83,7 @@ Every LLM call routes through the **TrueFoundry AI Gateway** (Grok primary; Clau
 | `evaluation.py` | `evaluate_all()` — runs all 5 incidents, scores vs ground_truth | **Track B** |
 | `app.py` | Streamlit UI — incident picker, artifacts, chaos console, eval | **Track B** |
 | `requirements.txt` | Python dependencies | Both update as needed |
+| `KICKOFF-TRANSCRIPT.md` | Verbatim hackathon kickoff transcript | Reference |
 
 **Rule:** never edit a file the other track owns. If a contract change in `schemas.py` is needed, both teammates agree before A edits it.
 
