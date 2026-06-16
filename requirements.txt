@@ -2,3 +2,4 @@ crewai
 openai
 python-dotenv
 pydantic
+streamlit
