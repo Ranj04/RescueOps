@@ -22,3 +22,7 @@ build-backend = "hatchling.build"
 
 [tool.crewai]
 type = "flow"
+flow_entry_point = "rescueops.main:ContentFlow"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rescueops"]
