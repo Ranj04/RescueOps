@@ -4,6 +4,10 @@
 
 See [`KICKOFF-TRANSCRIPT.md`](KICKOFF-TRANSCRIPT.md) for the full verbatim kickoff transcript (agenda, TrueFoundry/CrewAI talks, rules, judging criteria, and prizes).
 
+See [`TRUEFOUNDRY.md`](TRUEFOUNDRY.md) for how this project routes LLM calls through the TrueFoundry AI Gateway (config, failover, proof of connectivity).
+
+See [`CREWAI-USAGE.md`](CREWAI-USAGE.md) for how this project uses CrewAI (agents, crews, flows, structured output).
+
 See [`CREWAI-DOCS.md`](CREWAI-DOCS.md) for a comprehensive CrewAI reference (agents, crews, flows, tools, MCP, observability).
 
 ---
@@ -86,6 +90,8 @@ Every LLM call routes through the **TrueFoundry AI Gateway** (Grok primary; Clau
 | `app.py` | Streamlit UI — incident picker, artifacts, chaos console, eval | **Track B** |
 | `requirements.txt` | Python dependencies | Both update as needed |
 | `KICKOFF-TRANSCRIPT.md` | Verbatim hackathon kickoff transcript | Reference |
+| `TRUEFOUNDRY.md` | How RescueOps uses the TrueFoundry AI Gateway | Reference |
+| `CREWAI-USAGE.md` | How RescueOps uses CrewAI (agents, flow, schemas) | Reference |
 | `CREWAI-DOCS.md` | Comprehensive CrewAI documentation reference | Reference |
 
 **Rule:** never edit a file the other track owns. If a contract change in `schemas.py` is needed, both teammates agree before A edits it.

@@ -1,0 +1,64 @@
+{
+  "run_id": "0b317f23-431c-4b08-a4ff-5d5deb1c40bb",
+  "incident_id": "INC-001-checkout-db-pool",
+  "triage": {
+    "severity": "SEV-1",
+    "customer_facing": true,
+    "summary": "Checkout API 5xx error rate at 37% due to DB connection exhaustion after concurrency increase in checkout-v42 deploy.",
+    "route_to": "Diagnosis",
+    "reason": "Customer-facing checkout errors with 37% 5xx rate impacting revenue; recent deploy raised concurrency leading to DB pool exhaustion, needs immediate Diagnosis."
+  },
+  "diagnosis": {
+    "root_cause": "Increased worker concurrency from 8 to 24 in checkout-v42 deploy exhausted DB connection pool (100% used), causing OperationalError on new connections.",
+    "cited_evidence": [
+      "deploys[0].change: raised worker concurrency 8 -> 24",
+      "metrics.db_connections_used_pct.now: 100",
+      "metrics.checkout_error_rate.now: 0.37",
+      "logs[0]: psycopg2.OperationalError: FATAL: remaining connection slots are reserved / too many connections",
+      "metrics.checkout_worker_concurrency.now: 24"
+    ],
+    "confidence": 1.0,
+    "reasoning": "Deploy at 14:02 UTC raised concurrency (8\\u219224), 6 min later alert fired; db_connections_used_pct hit 100%, p99_latency_ms rose to 4100 ms, and logs show connection exhaustion errors exactly matching the 37% 5xx rate. All signals align on the concurrency change as the trigger."
+  },
+  "remediation": {
+    "safe": [],
+    "risky": [
+      {
+        "action": "Roll back checkout deployment to v41",
+        "rationale": "Reverts worker concurrency from 24 back to 8, directly relieving DB connection pool exhaustion caused by the v42 change.",
+        "destructive": true
+      }
+    ]
+  },
+  "approval": {
+    "approved": true,
+    "approver": "human-ui",
+    "note": "Operator approved risky actions via UI"
+  },
+  "verification": {
+    "recovered": true,
+    "metric_name": "checkout_error_rate",
+    "observed_value": 0.01,
+    "threshold": 0.05,
+    "note": "This is a projected post-remediation check over simulated telemetry, not a live re-measurement."
+  },
+  "postmortem": {
+    "summary": "Checkout API experienced a SEV-1 incident with 5xx error rate reaching 37% due to DB connection pool exhaustion following the checkout-v42 deployment that increased worker concurrency from 8 to 24. The issue was diagnosed from deploy logs, metrics showing 100% DB connections used, and psycopg2.OperationalError entries. Risky rollback to v41 was approved and executed, restoring error rate to 0.01.",
+    "timeline": [
+      "14:02 UTC: deploy-bot: checkout-v42 rolled out to prod, worker concurrency raised 8 -> 24",
+      "14:08 UTC: Alert fired - Checkout API 5xx error rate at 37% (threshold 5%) for 4 minutes",
+      "14:08 UTC: metrics.db_connections_used_pct hit 100%, p99_latency_ms rose to 4100 ms",
+      "14:08 UTC: logs show psycopg2.OperationalError: FATAL: remaining connection slots are reserved / too many connections and db pool acquire timeout after 3000ms"
+    ],
+    "root_cause": "Increased worker concurrency from 8 to 24 in checkout-v42 deploy exhausted DB connection pool (100% used), causing OperationalError on new connections.",
+    "actions_taken": [
+      "Roll back checkout deployment to v41"
+    ],
+    "follow_ups": [
+      "Add pre-deploy validation to check DB connection pool capacity against proposed worker concurrency changes",
+      "Implement automated canary analysis for concurrency-related metrics before full rollout",
+      "Increase DB connection pool size or introduce connection pooling middleware as capacity buffer"
+    ]
+  },
+  "chaos_config": null
+}

@@ -1,8 +1,11 @@
 """RescueOps — Streamlit control plane (Track B).
 
-Bold Typography design system: dark, editorial, type-driven.
-Every element earns its place. Confidence is measured, not vibed.
+Mission-control aesthetic: dark, editorial, type-driven.
+Vertical timeline with connected nodes. Measured confidence, not vibes.
 """
+import json
+from pathlib import Path
+
 import streamlit as st
 
 import audit
@@ -10,244 +13,242 @@ import evaluation
 import incidents
 import voice
 from pipeline import run_incident
-from schemas import ApprovalDecision, RemediationPlan
+from schemas import ApprovalDecision, RemediationPlan, RunResult
 
 TELEMETRY_SOURCES = ["logs", "metrics", "deploys"]
 
+_DEMO_PATH = Path(__file__).parent / "demo_example.json"
+
+
+def _load_demo_result():
+    if not _DEMO_PATH.exists():
+        return None
+    try:
+        return RunResult(**json.loads(_DEMO_PATH.read_text()))
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
-# Design system CSS
+# Design system CSS — mission-control / flight-recorder aesthetic
 # ---------------------------------------------------------------------------
 _CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter+Tight:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter+Tight:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,400&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
 :root {
-    --bg: #0A0A0A;
+    --bg: #09090B;
     --fg: #FAFAFA;
-    --muted: #1A1A1A;
-    --muted-fg: #737373;
-    --accent: #FF3D00;
-    --border: #262626;
-    --card: #0F0F0F;
+    --fg-2: #E4E4E7;
+    --muted: #18181B;
+    --muted-2: #27272A;
+    --muted-fg: #71717A;
+    --accent: #EF4444;
+    --accent-dim: rgba(239,68,68,0.08);
+    --accent-mid: rgba(239,68,68,0.15);
+    --green: #22C55E;
+    --green-dim: rgba(34,197,94,0.08);
+    --amber: #F59E0B;
+    --amber-dim: rgba(245,158,11,0.08);
+    --border: #27272A;
+    --border-subtle: #1E1E22;
 }
 
-/* ── Global resets ── */
+/* ── Global ── */
 .stApp {
     background-color: var(--bg) !important;
-    font-family: "Inter Tight", "Inter", system-ui, sans-serif !important;
-    letter-spacing: -0.01em;
+    font-family: "Inter Tight", system-ui, -apple-system, sans-serif !important;
+    letter-spacing: -0.011em;
+    color: var(--fg) !important;
 }
 
-/* Noise texture overlay */
 .stApp::before {
     content: "";
     position: fixed;
     inset: 0;
     z-index: 0;
     pointer-events: none;
-    opacity: 0.015;
-    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    opacity: 0.02;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
     background-repeat: repeat;
-    background-size: 256px 256px;
+    background-size: 200px 200px;
 }
 
-/* ── Kill all border-radius ── */
-.stApp [data-testid],
-.stApp button,
-.stApp input,
-.stApp select,
-.stApp textarea,
-.stApp [class*="Block"],
-.stApp [class*="card"],
-.stApp details,
-.stApp summary,
+/* ── Kill all radius ── */
+.stApp [data-testid], .stApp button, .stApp input, .stApp select,
+.stApp textarea, .stApp details, .stApp summary,
+.stApp [data-baseweb="select"] > div,
 .stApp [data-testid="stExpander"],
-.stApp [data-testid="stMetric"],
-.stApp [data-testid="stTab"],
 .stApp [data-testid="stDataFrame"],
 .stApp [data-testid="stAlert"] {
     border-radius: 0px !important;
 }
 
-/* ── Typography hierarchy ── */
+/* ── Typography ── */
 h1, .stApp h1 {
     font-family: "Inter Tight", system-ui, sans-serif !important;
     font-weight: 800 !important;
-    letter-spacing: -0.04em !important;
-    line-height: 1.05 !important;
-    font-size: 3rem !important;
+    letter-spacing: -0.045em !important;
+    line-height: 1.0 !important;
+    font-size: 2.75rem !important;
     color: var(--fg) !important;
 }
-
 h2, .stApp h2 {
     font-family: "Inter Tight", system-ui, sans-serif !important;
     font-weight: 700 !important;
-    letter-spacing: -0.04em !important;
-    line-height: 1.1 !important;
-    font-size: 1.75rem !important;
+    letter-spacing: -0.035em !important;
+    font-size: 1.5rem !important;
     color: var(--fg) !important;
 }
-
 h3, .stApp h3 {
     font-family: "Inter Tight", system-ui, sans-serif !important;
     font-weight: 600 !important;
     letter-spacing: -0.02em !important;
-    line-height: 1.2 !important;
-    font-size: 1.25rem !important;
+    font-size: 1.15rem !important;
     color: var(--fg) !important;
 }
-
 p, li, span, .stMarkdown {
     font-family: "Inter Tight", system-ui, sans-serif !important;
-    letter-spacing: -0.01em;
+    letter-spacing: -0.011em;
 }
-
 code, .stCode, [data-testid="stCode"] {
     font-family: "JetBrains Mono", "Fira Code", monospace !important;
-    font-size: 0.8rem !important;
+    font-size: 0.78rem !important;
+    background: var(--muted) !important;
+    padding: 0.15em 0.35em !important;
+    border: 1px solid var(--border-subtle) !important;
 }
 
 /* ── Sidebar ── */
 section[data-testid="stSidebar"] {
     background-color: var(--bg) !important;
     border-right: 1px solid var(--border) !important;
+    width: 320px !important;
 }
-
 section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
-    padding-top: 2rem !important;
+    padding: 1.5rem 1.25rem !important;
 }
 
 /* ── Buttons ── */
 .stApp button[kind="primary"],
 .stApp button[data-testid="stBaseButton-primary"] {
     background-color: var(--accent) !important;
-    color: var(--bg) !important;
+    color: #fff !important;
     border: none !important;
     border-radius: 0px !important;
-    font-family: "Inter Tight", system-ui, sans-serif !important;
+    font-family: "JetBrains Mono", monospace !important;
     font-weight: 600 !important;
-    letter-spacing: 0.1em !important;
+    letter-spacing: 0.08em !important;
     text-transform: uppercase !important;
-    font-size: 0.8rem !important;
-    transition: all 150ms cubic-bezier(0.25, 0, 0, 1) !important;
-    padding: 0.65rem 1.5rem !important;
+    font-size: 0.72rem !important;
+    transition: all 120ms cubic-bezier(0.25, 0, 0, 1) !important;
+    padding: 0.7rem 1.5rem !important;
 }
-
 .stApp button[kind="primary"]:hover,
 .stApp button[data-testid="stBaseButton-primary"]:hover {
-    background-color: #E63600 !important;
+    background-color: #DC2626 !important;
     transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(239,68,68,0.25) !important;
 }
-
 .stApp button[kind="primary"]:active,
 .stApp button[data-testid="stBaseButton-primary"]:active {
-    transform: translateY(1px) !important;
+    transform: translateY(0px) !important;
+    box-shadow: none !important;
 }
 
 .stApp button[kind="secondary"],
 .stApp button[data-testid="stBaseButton-secondary"] {
     background-color: transparent !important;
-    color: var(--fg) !important;
-    border: 1px solid var(--fg) !important;
+    color: var(--fg-2) !important;
+    border: 1px solid var(--border) !important;
     border-radius: 0px !important;
-    font-family: "Inter Tight", system-ui, sans-serif !important;
-    font-weight: 600 !important;
-    letter-spacing: 0.1em !important;
+    font-family: "JetBrains Mono", monospace !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.06em !important;
     text-transform: uppercase !important;
-    font-size: 0.8rem !important;
-    transition: all 150ms !important;
+    font-size: 0.72rem !important;
+    transition: all 120ms !important;
 }
-
 .stApp button[kind="secondary"]:hover,
 .stApp button[data-testid="stBaseButton-secondary"]:hover {
-    background-color: var(--fg) !important;
-    color: var(--bg) !important;
+    background-color: var(--muted) !important;
+    border-color: var(--muted-fg) !important;
 }
 
-/* ── Inputs & selects ── */
-.stApp input, .stApp select, .stApp textarea,
-.stApp [data-testid="stSelectbox"] > div,
-.stApp [data-baseweb="select"] {
-    border-radius: 0px !important;
-}
-
+/* ── Inputs ── */
 .stApp [data-baseweb="select"] > div {
     background-color: var(--muted) !important;
     border: 1px solid var(--border) !important;
     border-radius: 0px !important;
+    font-size: 0.85rem !important;
 }
 
 /* ── Tabs ── */
 .stApp [data-testid="stTab"] {
-    font-family: "Inter Tight", system-ui, sans-serif !important;
+    font-family: "JetBrains Mono", monospace !important;
     font-weight: 600 !important;
     letter-spacing: 0.1em !important;
     text-transform: uppercase !important;
-    font-size: 0.75rem !important;
-    padding: 0.75rem 1.5rem !important;
+    font-size: 0.68rem !important;
+    padding: 0.75rem 1.75rem !important;
     border-radius: 0px !important;
     color: var(--muted-fg) !important;
     border-bottom: 2px solid transparent !important;
-    transition: all 150ms !important;
+    transition: all 120ms !important;
 }
-
 .stApp [data-testid="stTab"][aria-selected="true"] {
     color: var(--fg) !important;
-    border-bottom: 2px solid var(--accent) !important;
+    border-bottom-color: var(--accent) !important;
     background: transparent !important;
 }
-
 .stApp [data-testid="stTab"]:hover {
-    color: var(--fg) !important;
+    color: var(--fg-2) !important;
 }
-
-/* Tab container border */
 .stApp [data-testid="stTabs"] [role="tablist"] {
     border-bottom: 1px solid var(--border) !important;
     gap: 0 !important;
 }
 
-/* ── Metrics ── */
+/* ── Metrics (Streamlit native) ── */
 [data-testid="stMetric"] {
-    background-color: transparent !important;
+    background: transparent !important;
     border-left: 2px solid var(--accent) !important;
-    padding: 0.75rem 1rem !important;
+    padding: 0.5rem 0.75rem !important;
 }
-
 [data-testid="stMetric"] label {
     font-family: "JetBrains Mono", monospace !important;
-    font-size: 0.65rem !important;
-    letter-spacing: 0.15em !important;
+    font-size: 0.6rem !important;
+    letter-spacing: 0.14em !important;
     text-transform: uppercase !important;
     color: var(--muted-fg) !important;
 }
-
 [data-testid="stMetric"] [data-testid="stMetricValue"] {
     font-family: "Inter Tight", system-ui, sans-serif !important;
     font-weight: 800 !important;
-    font-size: 2rem !important;
+    font-size: 1.8rem !important;
     letter-spacing: -0.04em !important;
-    color: var(--fg) !important;
 }
 
 /* ── Expander ── */
 .stApp [data-testid="stExpander"] {
-    border: 1px solid var(--border) !important;
+    border: 1px solid var(--border-subtle) !important;
     border-radius: 0px !important;
-    background-color: transparent !important;
+    background: transparent !important;
+    transition: border-color 150ms !important;
 }
-
+.stApp [data-testid="stExpander"]:hover {
+    border-color: var(--muted-fg) !important;
+}
 .stApp [data-testid="stExpander"] summary {
-    font-family: "Inter Tight", system-ui, sans-serif !important;
-    font-weight: 600 !important;
-    letter-spacing: 0.05em !important;
+    font-family: "JetBrains Mono", monospace !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.08em !important;
     text-transform: uppercase !important;
-    font-size: 0.75rem !important;
+    font-size: 0.68rem !important;
     color: var(--muted-fg) !important;
 }
-
 .stApp [data-testid="stExpander"] summary:hover {
-    color: var(--fg) !important;
+    color: var(--fg-2) !important;
 }
 
 /* ── Alerts ── */
@@ -256,32 +257,10 @@ section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
     border: none !important;
     border-left: 2px solid !important;
     background-color: var(--muted) !important;
-    font-family: "Inter Tight", system-ui, sans-serif !important;
-}
-
-/* Success alert */
-.stApp [data-testid="stAlert"][data-baseweb-type="positive"],
-.stApp .stSuccess [data-testid="stAlert"] {
-    border-left-color: #22C55E !important;
-}
-
-/* Warning alert */
-.stApp [data-testid="stAlert"][data-baseweb-type="warning"],
-.stApp .stWarning [data-testid="stAlert"] {
-    border-left-color: var(--accent) !important;
-}
-
-/* Info alert */
-.stApp [data-testid="stAlert"][data-baseweb-type="info"],
-.stApp .stInfo [data-testid="stAlert"] {
-    border-left-color: var(--muted-fg) !important;
 }
 
 /* ── Dividers ── */
-.stApp hr {
-    border-color: var(--border) !important;
-    margin: 2rem 0 !important;
-}
+.stApp hr { border-color: var(--border-subtle) !important; margin: 1.5rem 0 !important; }
 
 /* ── Dataframe ── */
 .stApp [data-testid="stDataFrame"] {
@@ -293,360 +272,461 @@ section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
 .stApp [data-testid="stCheckbox"] label,
 .stApp [data-testid="stRadio"] label {
     font-family: "Inter Tight", system-ui, sans-serif !important;
-    font-size: 0.85rem !important;
+    font-size: 0.82rem !important;
 }
 
-/* ── Spinner ── */
-.stApp .stSpinner > div {
-    border-top-color: var(--accent) !important;
+/* ── Hide chrome ── */
+header[data-testid="stHeader"] { background-color: var(--bg) !important; }
+footer { display: none !important; }
+
+/* ============================================================
+   CUSTOM COMPONENTS
+   ============================================================ */
+
+/* ── Mono label (reusable) ── */
+.mono-label {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.6rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted-fg);
+    line-height: 1;
 }
 
-/* ── Custom component: stage label ── */
-.stage-label {
+/* ── Hero ── */
+.ro-hero {
+    padding: 0.5rem 0 1.75rem 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 1.5rem;
+}
+.ro-hero-title {
+    font-family: "Inter Tight", system-ui, sans-serif;
+    font-weight: 900;
+    font-size: 2.5rem;
+    letter-spacing: -0.055em;
+    line-height: 1;
+    color: var(--fg);
+}
+.ro-hero-title .accent { color: var(--accent); }
+.ro-hero-sub {
     font-family: "JetBrains Mono", monospace;
     font-size: 0.65rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted-fg);
+    margin-top: 0.6rem;
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+}
+.ro-hero-sub span {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+.ro-hero-sub .dot {
+    width: 5px; height: 5px;
+    background: var(--accent);
+    display: inline-block;
+    flex-shrink: 0;
+}
+
+/* ── Sidebar sections ── */
+.sb-section {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.58rem;
     letter-spacing: 0.2em;
     text-transform: uppercase;
     color: var(--muted-fg);
-    margin-bottom: 0.25rem;
+    margin: 1.5rem 0 0.4rem 0;
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid var(--border-subtle);
 }
-
-.stage-num {
+.sb-brand {
     font-family: "Inter Tight", system-ui, sans-serif;
     font-weight: 800;
-    font-size: 3.5rem;
-    letter-spacing: -0.06em;
-    line-height: 1;
-    color: var(--border);
-    position: absolute;
-    top: -0.5rem;
-    right: 0;
-    z-index: 0;
-    user-select: none;
+    font-size: 1.2rem;
+    letter-spacing: -0.04em;
+    color: var(--fg);
+    margin-bottom: 0.25rem;
+}
+.sb-brand .accent { color: var(--accent); }
+
+/* ── Production path ── */
+.prod-path {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.6rem;
+    letter-spacing: 0.04em;
+    color: var(--muted-fg);
+    line-height: 1.65;
+    border-top: 1px solid var(--border-subtle);
+    padding-top: 0.75rem;
+    margin-top: 1rem;
+}
+.prod-path strong { color: var(--accent); }
+
+/* ── Section header ── */
+.sec-header {
+    font-family: "Inter Tight", system-ui, sans-serif;
+    font-weight: 800;
+    font-size: 1.6rem;
+    letter-spacing: -0.04em;
+    line-height: 1.1;
+    color: var(--fg);
+}
+.sec-sub {
+    font-family: "Inter Tight", system-ui, sans-serif;
+    font-size: 0.82rem;
+    color: var(--muted-fg);
+    line-height: 1.5;
+    margin-top: 0.25rem;
 }
 
-.stage-block {
+/* ── Timeline stage ── */
+.tl-stage {
+    display: flex;
+    gap: 1.25rem;
+    padding: 1.25rem 0;
     position: relative;
-    padding: 1.5rem 0;
-    border-top: 1px solid var(--border);
-    overflow: hidden;
 }
+.tl-rail {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 36px;
+    flex-shrink: 0;
+    position: relative;
+}
+.tl-node {
+    width: 36px;
+    height: 36px;
+    border: 2px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "JetBrains Mono", monospace;
+    font-weight: 700;
+    font-size: 0.72rem;
+    color: var(--muted-fg);
+    background: var(--bg);
+    z-index: 2;
+    flex-shrink: 0;
+    transition: all 200ms;
+}
+.tl-node.done {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--accent-dim);
+}
+.tl-node.held {
+    border-color: var(--amber);
+    color: var(--amber);
+    background: var(--amber-dim);
+}
+.tl-node.pass {
+    border-color: var(--green);
+    color: var(--green);
+    background: var(--green-dim);
+}
+.tl-line {
+    width: 2px;
+    flex-grow: 1;
+    background: var(--border-subtle);
+    min-height: 12px;
+}
+.tl-line.done { background: var(--accent); opacity: 0.3; }
 
-.stage-title {
+.tl-body {
+    flex-grow: 1;
+    min-width: 0;
+    padding-top: 0.35rem;
+}
+.tl-title {
     font-family: "Inter Tight", system-ui, sans-serif;
     font-weight: 700;
-    font-size: 1.1rem;
-    letter-spacing: -0.02em;
+    font-size: 0.95rem;
+    letter-spacing: -0.015em;
     color: var(--fg);
-    margin-bottom: 0.75rem;
-    position: relative;
-    z-index: 1;
+    margin-bottom: 0.1rem;
+}
+.tl-title-label {
+    font-family: "JetBrains Mono", monospace;
+    font-weight: 500;
+    font-size: 0.6rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted-fg);
+    margin-bottom: 0.2rem;
 }
 
-.stage-title .accent-bar {
+/* ── Metric row ── */
+.m-row {
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    margin: 0.6rem 0;
+}
+.m-item {
+    border-left: 2px solid var(--border);
+    padding: 0.35rem 0 0.35rem 0.65rem;
+    min-width: 100px;
+    transition: border-color 150ms;
+}
+.m-item:hover { border-color: var(--muted-fg); }
+.m-item.accent-border { border-color: var(--accent); }
+.m-item.green-border { border-color: var(--green); }
+.m-item.amber-border { border-color: var(--amber); }
+
+.m-label {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.55rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted-fg);
+    margin-bottom: 0.1rem;
+}
+.m-val {
+    font-family: "Inter Tight", system-ui, sans-serif;
+    font-weight: 800;
+    font-size: 1.5rem;
+    letter-spacing: -0.04em;
+    color: var(--fg);
+    line-height: 1.15;
+}
+.m-val.red { color: var(--accent); }
+.m-val.green { color: var(--green); }
+.m-val.amber { color: var(--amber); }
+.m-val.lg {
+    font-size: 2.25rem;
+    letter-spacing: -0.05em;
+}
+
+/* ── Evidence ── */
+.ev-item {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.75rem;
+    color: var(--fg-2);
+    padding: 0.4rem 0.5rem;
+    border-bottom: 1px solid var(--border-subtle);
+    transition: background 120ms;
+    letter-spacing: -0.01em;
+}
+.ev-item:hover { background: var(--muted); }
+.ev-item:last-child { border-bottom: none; }
+.ev-item::before {
+    content: "";
     display: inline-block;
-    width: 1rem;
-    height: 2px;
+    width: 4px; height: 4px;
     background: var(--accent);
-    margin-right: 0.5rem;
+    margin-right: 0.6rem;
     vertical-align: middle;
 }
 
-/* ── Custom metric block ── */
-.metric-row {
-    display: flex;
-    gap: 2rem;
-    flex-wrap: wrap;
+/* ── Action cards ── */
+.act-card {
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--border-subtle);
 }
-
-.metric-item {
-    border-left: 2px solid var(--accent);
-    padding: 0.5rem 0 0.5rem 0.75rem;
-    min-width: 120px;
-}
-
-.metric-label {
-    font-family: "JetBrains Mono", monospace;
-    font-size: 0.6rem;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-    color: var(--muted-fg);
-    margin-bottom: 0.15rem;
-}
-
-.metric-value {
-    font-family: "Inter Tight", system-ui, sans-serif;
-    font-weight: 800;
-    font-size: 1.75rem;
-    letter-spacing: -0.04em;
-    color: var(--fg);
-    line-height: 1.1;
-}
-
-.metric-value.accent {
-    color: var(--accent);
-}
-
-.metric-value.success {
-    color: #22C55E;
-}
-
-.metric-value.warning {
-    color: var(--accent);
-}
-
-/* ── Evidence list ── */
-.evidence-item {
-    font-family: "JetBrains Mono", monospace;
-    font-size: 0.78rem;
-    color: var(--fg);
-    padding: 0.35rem 0;
-    border-bottom: 1px solid var(--border);
-    letter-spacing: -0.01em;
-}
-
-.evidence-item:last-child {
-    border-bottom: none;
-}
-
-/* ── Remediation actions ── */
-.action-card {
-    padding: 0.75rem 0;
-    border-bottom: 1px solid var(--border);
-}
-
-.action-name {
+.act-card:last-child { border-bottom: none; }
+.act-name {
     font-family: "Inter Tight", system-ui, sans-serif;
     font-weight: 600;
-    font-size: 0.85rem;
+    font-size: 0.82rem;
     color: var(--fg);
-    letter-spacing: -0.01em;
+    line-height: 1.35;
 }
-
-.action-rationale {
+.act-rationale {
     font-family: "Inter Tight", system-ui, sans-serif;
-    font-size: 0.78rem;
+    font-size: 0.75rem;
     color: var(--muted-fg);
     margin-top: 0.15rem;
     line-height: 1.4;
 }
-
-.action-badge {
+.badge {
     display: inline-block;
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.6rem;
+    font-size: 0.55rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 0.1rem 0.45rem;
+    margin-left: 0.5rem;
+    vertical-align: middle;
+}
+.badge-safe { border: 1px solid var(--muted-fg); color: var(--muted-fg); }
+.badge-ok { border: 1px solid var(--green); color: var(--green); }
+.badge-held { border: 1px solid var(--amber); color: var(--amber); }
+
+/* ── Gate panel (approval) ── */
+.gate-panel {
+    padding: 0.75rem 1rem;
+    margin: 0.5rem 0;
+}
+.gate-panel.approved {
+    border-left: 3px solid var(--green);
+    background: var(--green-dim);
+}
+.gate-panel.held {
+    border-left: 3px solid var(--amber);
+    background: var(--amber-dim);
+}
+.gate-status {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.62rem;
+    font-weight: 700;
     letter-spacing: 0.15em;
     text-transform: uppercase;
-    padding: 0.15rem 0.5rem;
-    margin-left: 0.5rem;
+    margin-bottom: 0.2rem;
 }
-
-.badge-approved {
-    border: 1px solid #22C55E;
-    color: #22C55E;
-}
-
-.badge-held {
-    border: 1px solid var(--accent);
-    color: var(--accent);
-}
-
-.badge-safe {
-    border: 1px solid var(--muted-fg);
-    color: var(--muted-fg);
+.gate-status.approved { color: var(--green); }
+.gate-status.held { color: var(--amber); }
+.gate-detail {
+    font-family: "Inter Tight", system-ui, sans-serif;
+    font-size: 0.8rem;
+    color: var(--fg-2);
 }
 
 /* ── Chaos banner ── */
-.chaos-banner {
+.chaos-bar {
     border: 1px solid var(--accent);
     border-left: 3px solid var(--accent);
-    background: rgba(255, 61, 0, 0.05);
-    padding: 0.75rem 1rem;
-    margin-bottom: 1.5rem;
+    background: var(--accent-dim);
+    padding: 0.65rem 1rem;
+    margin-bottom: 1.25rem;
+    position: relative;
+    overflow: hidden;
+}
+.chaos-bar::after {
+    content: "";
+    position: absolute;
+    top: 0; left: -100%;
+    width: 100%; height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(239,68,68,0.04), transparent);
+    animation: chaos-scan 3s linear infinite;
+}
+@keyframes chaos-scan {
+    0% { left: -100%; }
+    100% { left: 100%; }
+}
+.chaos-bar .mono-label { color: var(--accent); margin-bottom: 0.2rem; }
+.chaos-bar .detail {
+    font-size: 0.8rem;
+    color: var(--fg-2);
+    line-height: 1.45;
+    position: relative;
+    z-index: 1;
 }
 
-.chaos-banner-label {
-    font-family: "JetBrains Mono", monospace;
-    font-size: 0.6rem;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-    color: var(--accent);
-    margin-bottom: 0.25rem;
-}
-
-.chaos-banner-detail {
-    font-family: "Inter Tight", system-ui, sans-serif;
-    font-size: 0.82rem;
-    color: var(--fg);
-    line-height: 1.5;
+/* Demo banner */
+.demo-bar {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--muted-fg);
+    background: rgba(255,255,255,0.015);
+    padding: 0.65rem 1rem;
+    margin-bottom: 1.25rem;
 }
 
 /* ── Audit log ── */
-.audit-entry {
+.aud-row {
     display: flex;
-    gap: 1rem;
-    padding: 0.3rem 0;
-    border-bottom: 1px solid var(--border);
+    gap: 0.75rem;
+    padding: 0.25rem 0;
+    border-bottom: 1px solid var(--border-subtle);
     align-items: baseline;
 }
-
-.audit-time {
+.aud-row:last-child { border-bottom: none; }
+.aud-time {
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.65rem;
+    font-size: 0.62rem;
     color: var(--muted-fg);
     flex-shrink: 0;
-    letter-spacing: 0.02em;
 }
-
-.audit-stage {
-    font-family: "Inter Tight", system-ui, sans-serif;
+.aud-stage {
+    font-family: "JetBrains Mono", monospace;
     font-weight: 600;
-    font-size: 0.78rem;
-    color: var(--fg);
+    font-size: 0.68rem;
+    color: var(--fg-2);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.06em;
 }
 
-/* ── Hero header ── */
-.hero-title {
+/* ── Timeline entries (postmortem) ── */
+.tl-entry {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.25rem 0;
     font-family: "Inter Tight", system-ui, sans-serif;
-    font-weight: 900;
-    font-size: 3.5rem;
-    letter-spacing: -0.05em;
-    line-height: 1;
-    color: var(--fg);
-    margin-bottom: 0.5rem;
+    font-size: 0.8rem;
+    color: var(--fg-2);
+    line-height: 1.4;
 }
-
-.hero-title .accent {
-    color: var(--accent);
-}
-
-.hero-sub {
-    font-family: "JetBrains Mono", monospace;
-    font-size: 0.7rem;
-    letter-spacing: 0.15em;
-    text-transform: uppercase;
-    color: var(--muted-fg);
-    line-height: 1.8;
-}
-
-/* ── Section headers ── */
-.section-header {
-    font-family: "Inter Tight", system-ui, sans-serif;
-    font-weight: 800;
-    font-size: 2rem;
-    letter-spacing: -0.04em;
-    line-height: 1.1;
-    color: var(--fg);
-    margin-bottom: 0.25rem;
-}
-
-.section-sub {
-    font-family: "Inter Tight", system-ui, sans-serif;
-    font-size: 0.85rem;
-    color: var(--muted-fg);
-    line-height: 1.5;
-    max-width: 600px;
-}
-
-/* ── Empty state ── */
-.empty-state {
-    text-align: center;
-    padding: 4rem 2rem;
-    border: 1px dashed var(--border);
-}
-
-.empty-state-title {
-    font-family: "Inter Tight", system-ui, sans-serif;
-    font-weight: 700;
-    font-size: 1.1rem;
-    letter-spacing: -0.02em;
-    color: var(--muted-fg);
-    margin-bottom: 0.5rem;
-}
-
-.empty-state-hint {
-    font-family: "JetBrains Mono", monospace;
-    font-size: 0.7rem;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--muted-fg);
-    opacity: 0.6;
-}
-
-/* ── Path to production footer ── */
-.prod-path {
-    font-family: "JetBrains Mono", monospace;
-    font-size: 0.65rem;
-    letter-spacing: 0.05em;
-    color: var(--muted-fg);
-    line-height: 1.7;
-    border-top: 1px solid var(--border);
-    padding-top: 0.75rem;
-    margin-top: 1rem;
-}
-
-/* ── Sidebar section titles ── */
-.sidebar-section {
-    font-family: "JetBrains Mono", monospace;
-    font-size: 0.6rem;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-    color: var(--muted-fg);
-    margin: 1.25rem 0 0.5rem 0;
-    padding-bottom: 0.25rem;
-    border-bottom: 1px solid var(--border);
-}
-
-/* ── Eval table ── */
-.eval-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 0;
-    border: 1px solid var(--border);
-    margin: 1.5rem 0;
-}
-
-.eval-cell {
-    padding: 1rem;
-    border-right: 1px solid var(--border);
-    border-bottom: 1px solid var(--border);
-}
-
-.eval-cell:nth-child(4n) {
-    border-right: none;
-}
-
-/* ── Timeline connector ── */
-.timeline-dot {
-    display: inline-block;
-    width: 6px;
-    height: 6px;
+.tl-entry-dot {
+    width: 5px; height: 5px;
     background: var(--accent);
-    margin-right: 0.5rem;
     flex-shrink: 0;
     margin-top: 0.4rem;
 }
 
-.timeline-entry {
-    display: flex;
-    align-items: flex-start;
-    padding: 0.3rem 0;
+/* ── Empty state ── */
+.empty {
+    text-align: center;
+    padding: 5rem 2rem;
+    border: 1px dashed var(--border);
+}
+.empty-title {
     font-family: "Inter Tight", system-ui, sans-serif;
-    font-size: 0.82rem;
+    font-weight: 700;
+    font-size: 1rem;
+    color: var(--muted-fg);
+    margin-bottom: 0.4rem;
+}
+.empty-hint {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.65rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted-fg);
+    opacity: 0.5;
+}
+
+/* ── Eval per-incident row ── */
+.eval-row {
+    display: grid;
+    grid-template-columns: 2fr repeat(4, 1fr);
+    gap: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 0.6rem 0;
+    align-items: center;
+    font-size: 0.8rem;
+    transition: background 120ms;
+}
+.eval-row:hover { background: var(--muted); }
+.eval-row-header {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.58rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted-fg);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.4rem;
+    margin-bottom: 0.2rem;
+}
+.eval-cell {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.78rem;
+    color: var(--fg-2);
+    padding: 0 0.5rem;
+}
+.eval-cell.name {
+    font-family: "Inter Tight", system-ui, sans-serif;
+    font-weight: 600;
+    font-size: 0.8rem;
     color: var(--fg);
-    line-height: 1.4;
 }
-
-/* Hide default Streamlit header/footer */
-header[data-testid="stHeader"] {
-    background-color: var(--bg) !important;
-}
-
-footer {
-    display: none !important;
-}
+.eval-pass { color: var(--green); }
+.eval-fail { color: var(--accent); }
+.eval-mid { color: var(--amber); }
 </style>
 """
 
@@ -676,23 +756,34 @@ def _html(content: str) -> None:
     st.markdown(content, unsafe_allow_html=True)
 
 
-def _stage_header(num: int, title: str) -> None:
-    _html(f"""
-    <div class="stage-block">
-        <div class="stage-num">{num:02d}</div>
-        <div class="stage-title"><span class="accent-bar"></span>{title}</div>
-    </div>
-    """)
+def _m(label: str, value: str, color: str = "", size: str = "", border: str = "accent-border") -> str:
+    """Build one metric-item HTML."""
+    vcls = "m-val"
+    if color:
+        vcls += f" {color}"
+    if size:
+        vcls += f" {size}"
+    return f"""<div class="m-item {border}">
+        <div class="m-label">{label}</div>
+        <div class="{vcls}">{value}</div>
+    </div>"""
 
 
-def _metric_html(label: str, value: str, style: str = "") -> str:
-    cls = f"metric-value {style}" if style else "metric-value"
-    return f"""
-    <div class="metric-item">
-        <div class="metric-label">{label}</div>
-        <div class="{cls}">{value}</div>
-    </div>
-    """
+def _tl_open(num: int, title: str, label: str = "", node_cls: str = "done") -> None:
+    """Open a timeline stage block (call _tl_close after content)."""
+    label_html = f'<div class="tl-title-label">{label}</div>' if label else ""
+    _html(f"""<div class="tl-stage">
+        <div class="tl-rail">
+            <div class="tl-node {node_cls}">{num:02d}</div>
+            <div class="tl-line done"></div>
+        </div>
+        <div class="tl-body">
+            {label_html}
+            <div class="tl-title">{title}</div>""")
+
+
+def _tl_close() -> None:
+    _html("</div></div>")
 
 
 # ---------------------------------------------------------------------------
@@ -700,103 +791,84 @@ def _metric_html(label: str, value: str, style: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 def _render_triage(t) -> None:
-    _stage_header(1, "Triage")
-    _html(f"""
-    <div class="metric-row">
-        {_metric_html("Severity", t.severity, "accent" if t.severity == "SEV-1" else "")}
-        {_metric_html("Customer Facing", "YES" if t.customer_facing else "NO",
-                       "warning" if t.customer_facing else "")}
-        {_metric_html("Route To", t.route_to)}
-    </div>
-    """)
-    st.write(t.summary)
-    _html(f'<div class="stage-label">Reason: {t.reason}</div>')
+    sev_color = "red" if t.severity == "SEV-1" else ("amber" if t.severity == "SEV-2" else "")
+    cust_color = "amber" if t.customer_facing else ""
+    _tl_open(1, "Triage", "Stage 1")
+    _html(f"""<div class="m-row">
+        {_m("Severity", t.severity, sev_color, "lg")}
+        {_m("Customer Facing", "YES" if t.customer_facing else "NO", cust_color, "", "amber-border" if t.customer_facing else "accent-border")}
+        {_m("Route To", t.route_to, "", "", "accent-border")}
+    </div>""")
+    _html(f'<div style="font-size:0.85rem; color:var(--fg-2); margin:0.5rem 0; line-height:1.5;">{t.summary}</div>')
+    _html(f'<div class="mono-label" style="margin-top:0.25rem;">Reason: {t.reason}</div>')
+    _tl_close()
 
 
 def _render_diagnosis(d, chaos_config) -> None:
-    _stage_header(2, "Diagnosis")
+    conf_color = "green" if d.confidence >= 0.8 else ("amber" if d.confidence >= 0.5 else "red")
+    conf_border = "green-border" if d.confidence >= 0.8 else ("amber-border" if d.confidence >= 0.5 else "accent-border")
+    _tl_open(2, "Diagnosis", "Stage 2")
 
-    conf_style = "success" if d.confidence >= 0.8 else ("warning" if d.confidence >= 0.5 else "accent")
-    _html(f"""
-    <div class="metric-row">
-        {_metric_html("Confidence", f"{d.confidence:.2f}", conf_style)}
-    </div>
-    """)
+    _html(f"""<div class="m-row">
+        {_m("Confidence", f"{d.confidence:.2f}", conf_color, "lg", conf_border)}
+    </div>""")
 
     if chaos_config and chaos_config.get("disable_sources"):
         sources = ", ".join(chaos_config["disable_sources"])
-        _html(f"""
-        <div class="chaos-banner" style="margin-top: 0.75rem;">
-            <div class="chaos-banner-label">Telemetry Degraded</div>
-            <div class="chaos-banner-detail">
-                Sources disabled: <strong>{sources}</strong>.
-                Confidence is computed by the pipeline from remaining sources — not by the LLM.
-            </div>
-        </div>
-        """)
+        _html(f"""<div class="chaos-bar" style="margin-top:0.6rem;">
+            <div class="mono-label">Telemetry Degraded</div>
+            <div class="detail">Sources disabled: <strong>{sources}</strong>. Confidence computed from remaining sources — not by the LLM.</div>
+        </div>""")
 
-    _html(f"""
-    <div style="margin-top: 0.75rem;">
-        <div class="stage-label">Root Cause</div>
-        <div style="font-size: 0.95rem; color: var(--fg); line-height: 1.5; margin-top: 0.25rem;">{d.root_cause}</div>
-    </div>
-    """)
+    _html(f"""<div style="margin-top:0.5rem;">
+        <div class="mono-label">Root Cause</div>
+        <div style="font-size:0.88rem; color:var(--fg); line-height:1.5; margin-top:0.2rem;">{d.root_cause}</div>
+    </div>""")
+    _tl_close()
 
     with st.expander("CITED EVIDENCE"):
-        evidence_html = "".join(f'<div class="evidence-item">{ev}</div>' for ev in d.cited_evidence)
-        _html(evidence_html if evidence_html else '<div class="evidence-item" style="color: var(--muted-fg);">No evidence cited</div>')
+        if d.cited_evidence:
+            _html("".join(f'<div class="ev-item">{ev}</div>' for ev in d.cited_evidence))
+        else:
+            _html('<div class="ev-item" style="color:var(--muted-fg);">No evidence cited</div>')
 
     with st.expander("REASONING"):
         st.write(d.reasoning)
 
 
 def _render_remediation(plan, decision, diagnosis=None) -> None:
-    _stage_header(3, "Remediation")
+    _tl_open(3, "Remediation Plan", "Stage 3")
+    _tl_close()
 
     col_safe, col_risky = st.columns(2)
-
     with col_safe:
-        _html('<div class="stage-label">Safe Actions — Auto-Applied</div>')
+        _html('<div class="mono-label" style="margin-bottom:0.4rem;">Safe — Auto-Applied</div>')
         for a in plan.safe:
-            _html(f"""
-            <div class="action-card">
-                <div class="action-name">{a.action}<span class="action-badge badge-safe">safe</span></div>
-                <div class="action-rationale">{a.rationale}</div>
-            </div>
-            """)
+            _html(f"""<div class="act-card">
+                <div class="act-name">{a.action}<span class="badge badge-safe">safe</span></div>
+                <div class="act-rationale">{a.rationale}</div>
+            </div>""")
 
     with col_risky:
-        _html('<div class="stage-label">Risky Actions — Require Approval</div>')
+        _html('<div class="mono-label" style="margin-bottom:0.4rem;">Risky — Require Approval</div>')
         for a in plan.risky:
-            badge_cls = "badge-approved" if decision.approved else "badge-held"
-            badge_txt = "approved" if decision.approved else "held"
-            _html(f"""
-            <div class="action-card">
-                <div class="action-name">{a.action}<span class="action-badge {badge_cls}">{badge_txt}</span></div>
-                <div class="action-rationale">{a.rationale}</div>
-            </div>
-            """)
+            bcls = "badge-ok" if decision.approved else "badge-held"
+            btxt = "approved" if decision.approved else "held"
+            _html(f"""<div class="act-card">
+                <div class="act-name">{a.action}<span class="badge {bcls}">{btxt}</span></div>
+                <div class="act-rationale">{a.rationale}</div>
+            </div>""")
 
     # Approval gate
-    _stage_header(4, "Approval Gate")
-    if decision.approved:
-        _html(f"""
-        <div style="border-left: 3px solid #22C55E; padding: 0.5rem 0.75rem; background: rgba(34,197,94,0.05);">
-            <div class="stage-label" style="color: #22C55E;">Approved</div>
-            <div style="font-size: 0.82rem; color: var(--fg);">
-                {decision.approver} — {decision.note}
-            </div>
-        </div>
-        """)
-    else:
-        _html(f"""
-        <div style="border-left: 3px solid var(--accent); padding: 0.5rem 0.75rem; background: rgba(255,61,0,0.05);">
-            <div class="stage-label" style="color: var(--accent);">Held</div>
-            <div style="font-size: 0.82rem; color: var(--fg);">
-                {decision.approver} — {decision.note}
-            </div>
-        </div>
-        """)
+    gate_cls = "approved" if decision.approved else "held"
+    status_label = "APPROVED" if decision.approved else "HELD"
+    node_cls = "pass" if decision.approved else "held"
+    _tl_open(4, "Approval Gate", "Stage 4 — Human-in-the-Loop", node_cls)
+    _html(f"""<div class="gate-panel {gate_cls}">
+        <div class="gate-status {gate_cls}">{status_label}</div>
+        <div class="gate-detail">{decision.approver} — {decision.note}</div>
+    </div>""")
+    _tl_close()
 
     if st.session_state.get("voice_enabled") and diagnosis is not None and voice.available():
         if st.button("SPEAK DIAGNOSIS"):
@@ -804,36 +876,37 @@ def _render_remediation(plan, decision, diagnosis=None) -> None:
 
 
 def _render_verification(v) -> None:
-    _stage_header(5, "Verification")
-    recovered_style = "success" if v.recovered else "accent"
-    _html(f"""
-    <div class="metric-row">
-        {_metric_html("Recovered", "YES" if v.recovered else "NO", recovered_style)}
-        {_metric_html(v.metric_name, f"{v.observed_value}")}
-        {_metric_html("Threshold", f"{v.threshold}")}
-    </div>
-    """)
-    _html(f'<div class="stage-label" style="margin-top: 0.5rem;">{v.note}</div>')
+    node_cls = "pass" if v.recovered else "held"
+    rec_color = "green" if v.recovered else "red"
+    rec_border = "green-border" if v.recovered else "accent-border"
+    _tl_open(5, "Verification", "Stage 5", node_cls)
+    _html(f"""<div class="m-row">
+        {_m("Recovered", "YES" if v.recovered else "NO", rec_color, "lg", rec_border)}
+        {_m(v.metric_name, f"{v.observed_value}", "", "", "accent-border")}
+        {_m("Threshold", f"{v.threshold}", "", "", "accent-border")}
+    </div>""")
+    _html(f'<div class="mono-label" style="margin-top:0.35rem;">{v.note}</div>')
+    _tl_close()
 
 
 def _render_postmortem(p) -> None:
-    _stage_header(6, "Postmortem")
-    st.write(p.summary)
+    _tl_open(6, "Postmortem", "Stage 6")
+    _html(f'<div style="font-size:0.85rem; color:var(--fg-2); line-height:1.55; margin:0.3rem 0;">{p.summary}</div>')
+    _tl_close()
 
     with st.expander("TIMELINE"):
-        timeline_html = "".join(
-            f'<div class="timeline-entry"><div class="timeline-dot"></div>{item}</div>'
+        _html("".join(
+            f'<div class="tl-entry"><div class="tl-entry-dot"></div>{item}</div>'
             for item in p.timeline
-        )
-        _html(timeline_html)
+        ))
 
     with st.expander("ACTIONS & FOLLOW-UPS"):
-        _html('<div class="stage-label">Actions Taken</div>')
+        _html('<div class="mono-label" style="margin-bottom:0.3rem;">Actions Taken</div>')
         for a in p.actions_taken:
-            _html(f'<div class="timeline-entry"><div class="timeline-dot"></div>{a}</div>')
-        _html('<div class="stage-label" style="margin-top: 0.75rem;">Follow-Ups</div>')
+            _html(f'<div class="tl-entry"><div class="tl-entry-dot"></div>{a}</div>')
+        _html('<div class="mono-label" style="margin:0.6rem 0 0.3rem 0;">Follow-Ups</div>')
         for f in p.follow_ups:
-            _html(f'<div class="timeline-entry"><div class="timeline-dot"></div>{f}</div>')
+            _html(f'<div class="tl-entry"><div class="tl-entry-dot"></div>{f}</div>')
 
 
 def _render_timeline(result, chaos_config) -> None:
@@ -848,12 +921,10 @@ def _render_audit(run_id: str) -> None:
     events = audit.get_run(run_id)
     with st.expander(f"AUDIT LOG — {len(events)} EVENTS"):
         for e in events:
-            _html(f"""
-            <div class="audit-entry">
-                <span class="audit-time">{e['created_at'][:19]}</span>
-                <span class="audit-stage">{e['stage']}</span>
-            </div>
-            """)
+            _html(f"""<div class="aud-row">
+                <span class="aud-time">{e['created_at'][:19]}</span>
+                <span class="aud-stage">{e['stage']}</span>
+            </div>""")
 
 
 # ---------------------------------------------------------------------------
@@ -862,46 +933,61 @@ def _render_audit(run_id: str) -> None:
 
 def _incident_response_tab(incident_map: dict) -> None:
     result = st.session_state.get("result")
+    is_demo = False
     if result is None:
-        _html("""
-        <div class="empty-state">
-            <div class="empty-state-title">No incident loaded</div>
-            <div class="empty-state-hint">Select an incident in the sidebar and click Run</div>
-        </div>
-        """)
+        result = _load_demo_result()
+        is_demo = result is not None
+    if result is None:
+        _html("""<div class="empty">
+            <div class="empty-title">No incident loaded</div>
+            <div class="empty-hint">Select an incident in the sidebar and press Run</div>
+        </div>""")
         return
 
     chaos_config = result.chaos_config
     title = incident_map.get(result.incident_id, result.incident_id)
 
-    _html(f'<div class="section-header">{title}</div>')
-    _html(f'<div class="section-sub" style="margin-bottom: 1.5rem;">Run ID: <code>{result.run_id[:12]}</code></div>')
+    _html(f'<div class="sec-header">{title}</div>')
+    _html(f'<div class="sec-sub">Run <code>{result.run_id[:12]}</code></div>')
+    _html('<div style="height:1rem;"></div>')
+
+    if is_demo:
+        _html("""<div class="demo-bar">
+            <div class="mono-label">Pre-Loaded Example</div>
+            <div style="font-size:0.8rem; color:var(--fg-2); margin-top:0.15rem;">
+                A prior run shown instantly. Click <strong>RUN INCIDENT</strong> to execute a fresh one.
+            </div>
+        </div>""")
 
     if chaos_config:
         bits = []
         if chaos_config.get("disable_sources"):
             bits.append("sources disabled: <strong>" + ", ".join(chaos_config["disable_sources"]) + "</strong>")
         if chaos_config.get("break_primary_model"):
-            bits.append("primary model broken — gateway failing over (see TrueFoundry Traces)")
-        _html(f"""
-        <div class="chaos-banner">
-            <div class="chaos-banner-label">Chaos Active</div>
-            <div class="chaos-banner-detail">{"  ·  ".join(bits)}</div>
-        </div>
-        """)
+            bits.append("primary model broken — gateway failing over")
+        _html(f"""<div class="chaos-bar">
+            <div class="mono-label">Chaos Active</div>
+            <div class="detail">{"&ensp;·&ensp;".join(bits)}</div>
+        </div>""")
 
     _render_timeline(result, chaos_config)
     _render_audit(result.run_id)
 
 
+def _score_color(val: float, threshold: float = 0.7) -> str:
+    if val >= threshold:
+        return "eval-pass"
+    if val >= 0.4:
+        return "eval-mid"
+    return "eval-fail"
+
+
 def _evaluation_tab() -> None:
-    _html('<div class="section-header">Evaluation</div>')
-    _html("""
-    <div class="section-sub" style="margin-bottom: 1.5rem;">
-        Measured performance vs labeled ground truth. Runs all incidents with no chaos
-        and an auto-approve callback. The live run never sees ground truth.
-    </div>
-    """)
+    _html('<div class="sec-header">Evaluation</div>')
+    _html("""<div class="sec-sub" style="margin-bottom:1.25rem;">
+        Measured accuracy vs labeled ground truth across all 5 incidents.
+        No chaos, auto-approve. Agents never see ground truth.
+    </div>""")
 
     if st.button("RUN EVALUATION — ALL 5 INCIDENTS", type="primary"):
         with st.spinner("Scoring all incidents against ground truth..."):
@@ -909,29 +995,52 @@ def _evaluation_tab() -> None:
 
     summary = st.session_state.get("eval") or evaluation.get_latest_eval()
     if not summary:
-        _html("""
-        <div class="empty-state" style="margin-top: 1.5rem;">
-            <div class="empty-state-title">No evaluation run yet</div>
-            <div class="empty-state-hint">Click above to score all 5 incidents</div>
-        </div>
-        """)
+        _html("""<div class="empty" style="margin-top:1.25rem;">
+            <div class="empty-title">No evaluation run yet</div>
+            <div class="empty-hint">Click above to score all 5 incidents</div>
+        </div>""")
         return
 
     agg = summary["aggregate"]
-    _html(f"""
-    <div class="metric-row" style="margin: 1.5rem 0;">
-        {_metric_html("Severity Accuracy", f"{agg['severity_accuracy']:.0%}",
-                       "success" if agg['severity_accuracy'] >= 0.8 else "warning")}
-        {_metric_html("Evidence Recall", f"{agg['mean_evidence_recall']:.0%}",
-                       "success" if agg['mean_evidence_recall'] >= 0.7 else "warning")}
-        {_metric_html("Remediation Overlap", f"{agg['mean_remediation_overlap']:.0%}",
-                       "success" if agg['mean_remediation_overlap'] >= 0.7 else "warning")}
-        {_metric_html("Recovery Rate", f"{agg['recovery_rate']:.0%}",
-                       "success" if agg['recovery_rate'] >= 0.8 else "warning")}
-    </div>
-    """)
 
-    st.dataframe(summary["by_incident"], use_container_width=True, hide_index=True)
+    # Aggregate metrics
+    sev_c = "green" if agg["severity_accuracy"] >= 0.8 else "amber"
+    ev_c = "green" if agg["mean_evidence_recall"] >= 0.7 else "amber"
+    rem_c = "green" if agg["mean_remediation_overlap"] >= 0.7 else "amber"
+    rec_c = "green" if agg["recovery_rate"] >= 0.8 else "amber"
+    sev_b = "green-border" if agg["severity_accuracy"] >= 0.8 else "amber-border"
+    ev_b = "green-border" if agg["mean_evidence_recall"] >= 0.7 else "amber-border"
+    rem_b = "green-border" if agg["mean_remediation_overlap"] >= 0.7 else "amber-border"
+    rec_b = "green-border" if agg["recovery_rate"] >= 0.8 else "amber-border"
+
+    _html(f"""<div class="m-row" style="margin:1.25rem 0;">
+        {_m("Severity Accuracy", f"{agg['severity_accuracy']:.0%}", sev_c, "lg", sev_b)}
+        {_m("Evidence Recall", f"{agg['mean_evidence_recall']:.0%}", ev_c, "lg", ev_b)}
+        {_m("Remediation Overlap", f"{agg['mean_remediation_overlap']:.0%}", rem_c, "lg", rem_b)}
+        {_m("Recovery Rate", f"{agg['recovery_rate']:.0%}", rec_c, "lg", rec_b)}
+    </div>""")
+
+    # Per-incident table
+    _html("""<div class="eval-row eval-row-header">
+        <div class="eval-cell">Incident</div>
+        <div class="eval-cell">Severity</div>
+        <div class="eval-cell">Evidence</div>
+        <div class="eval-cell">Remediation</div>
+        <div class="eval-cell">Recovered</div>
+    </div>""")
+
+    for inc in summary["by_incident"]:
+        sev_cls = "eval-pass" if inc["severity_correct"] else "eval-fail"
+        ev_cls = _score_color(inc["evidence_recall"])
+        rem_cls = _score_color(inc["remediation_overlap"])
+        rec_cls = "eval-pass" if inc["recovered"] else "eval-fail"
+        _html(f"""<div class="eval-row">
+            <div class="eval-cell name">{inc['incident_id']}</div>
+            <div class="eval-cell {sev_cls}">{"PASS" if inc['severity_correct'] else "FAIL"}</div>
+            <div class="eval-cell {ev_cls}">{inc['evidence_recall']:.0%}</div>
+            <div class="eval-cell {rem_cls}">{inc['remediation_overlap']:.0%}</div>
+            <div class="eval-cell {rec_cls}">{"YES" if inc['recovered'] else "NO"}</div>
+        </div>""")
 
 
 # ---------------------------------------------------------------------------
@@ -943,24 +1052,25 @@ def main() -> None:
     _html(_CSS)
     audit.init_db()
 
-    # Hero header
-    _html("""
-    <div style="padding: 1rem 0 2rem 0;">
-        <div class="hero-title">RESCUE<span class="accent">OPS</span></div>
-        <div class="hero-sub">
-            CrewAI Agents · TrueFoundry Gateway · Human-in-the-Loop Governance
+    # Hero
+    _html("""<div class="ro-hero">
+        <div class="ro-hero-title">RESCUE<span class="accent">OPS</span></div>
+        <div class="ro-hero-sub">
+            <span><span class="dot"></span>CrewAI Agents</span>
+            <span><span class="dot"></span>TrueFoundry Gateway</span>
+            <span><span class="dot"></span>Human-in-the-Loop</span>
         </div>
-    </div>
-    """)
+    </div>""")
 
     incident_list = incidents.load_incidents()
     incident_map = {inc["id"]: inc.get("title", inc["id"]) for inc in incident_list}
 
-    # ── Sidebar ──
+    # Sidebar
     with st.sidebar:
-        _html('<div class="hero-title" style="font-size: 1.5rem; margin-bottom: 1.5rem;">RESCUE<span class="accent">OPS</span></div>')
+        _html('<div class="sb-brand">RESCUE<span class="accent">OPS</span></div>')
+        _html('<div class="mono-label">Mission Control</div>')
 
-        _html('<div class="sidebar-section">Incident</div>')
+        _html('<div class="sb-section">Incident</div>')
         incident_id = st.selectbox(
             "Select incident",
             options=[inc["id"] for inc in incident_list],
@@ -968,11 +1078,11 @@ def main() -> None:
             label_visibility="collapsed",
         )
 
-        _html('<div class="sidebar-section">Chaos Console</div>')
+        _html('<div class="sb-section">Chaos Console</div>')
         disabled = [s for s in TELEMETRY_SOURCES if st.checkbox(f"Disable {s}", key=f"chaos_{s}")]
         break_model = st.checkbox("Break primary model")
 
-        _html('<div class="sidebar-section">Governance</div>')
+        _html('<div class="sb-section">Governance</div>')
         approve_risky = st.radio(
             "Risky actions",
             options=[False, True],
@@ -982,23 +1092,20 @@ def main() -> None:
         )
         st.session_state["voice_enabled"] = st.checkbox("Voice narration", value=False)
 
-        st.markdown("")  # spacer
+        _html('<div style="height:0.75rem;"></div>')
         if st.button("RUN INCIDENT", type="primary", use_container_width=True):
             chaos_config = build_chaos_config(disabled, break_model)
             callback = make_approval_callback(approve_risky)
             with st.spinner("Running pipeline..."):
                 st.session_state["result"] = run_incident(incident_id, chaos_config, callback)
 
-        _html("""
-        <div class="prod-path">
-            <strong style="color: var(--accent);">Path to production:</strong><br>
-            Swap synthetic incidents for live telemetry ·
-            Enable TrueFoundry guardrails (PII/secret scrubbing) ·
-            Deploy crew behind approval + audit controls
-        </div>
-        """)
+        _html("""<div class="prod-path">
+            <strong>Path to production:</strong><br>
+            Live telemetry sources · TrueFoundry guardrails ·
+            Approval + audit controls · Gateway failover
+        </div>""")
 
-    # ── Main content tabs ──
+    # Tabs
     tab_run, tab_eval = st.tabs(["INCIDENT RESPONSE", "EVALUATION"])
     with tab_run:
         _incident_response_tab(incident_map)
