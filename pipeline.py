@@ -1,22 +1,32 @@
-"""Incident response pipeline — CrewAI Flow orchestrating the sequential crew.
+"""Incident response pipeline — sequential CrewAI crews behind a two-phase API.
 
-Public API (Track B builds against this signature):
+Public API:
+    run_until_approval(incident_id, chaos_config=None, on_stage=None) -> PartialRunResult
+        Stages 1-3 (triage -> diagnosis -> remediation). Stops BEFORE any risky
+        action is executed. The HTTP backend holds the returned partial in memory
+        while it waits for a human decision, so the request never blocks on a human.
+
+    resume_after_approval(partial, decision, on_stage=None) -> RunResult
+        Stages 5-6 (verification -> postmortem), applying the approval decision.
+
     run_incident(incident_id, chaos_config=None, approval_callback=None) -> RunResult
+        CLI/eval convenience wrapper that chains the two phases with a synchronous
+        approval callback (auto-approves if none supplied).
 
-Phase A3: triage + diagnosis + remediation use real CrewAI agents.
-          Approval gate wired to caller-supplied callback.
-          Verification / Postmortem remain stubbed (A4).
+`on_stage(stage, artifact)` is an optional progress hook (used by the SSE stream in
+Phase 9). It is called with each pydantic artifact as it is produced; default no-op.
+
+Every LLM call routes through `config.build_llm` -> the TrueFoundry gateway.
+Confidence is computed deterministically from telemetry coverage, never by an LLM.
 """
 from __future__ import annotations
 
 import json
 import uuid
 from collections.abc import Callable
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from crewai import Crew, Process, Task
-from crewai.flow.flow import Flow, listen, start
-from pydantic import BaseModel, Field
 
 from agents import (
     build_diagnosis_agent,
@@ -30,6 +40,7 @@ from incidents import get_incident, observable
 from schemas import (
     ApprovalDecision,
     DiagnosisReport,
+    PartialRunResult,
     PostmortemReport,
     RemediationAction,
     RemediationPlan,
@@ -59,6 +70,9 @@ def _log(run_id: str, stage: str, payload: dict) -> None:
         _log_event(run_id, stage, payload)
 
 
+_NOOP_STAGE = lambda stage, artifact: None  # noqa: E731 — trivial default hook
+
+
 # ---------------------------------------------------------------------------
 # Confidence computed deterministically from telemetry coverage (never by LLM)
 # ---------------------------------------------------------------------------
@@ -79,6 +93,25 @@ def _compute_confidence(telemetry: dict) -> Tuple[float, str]:
     return confidence, note
 
 
+def _fallback_model(chaos_config: Optional[Dict[str, Any]]) -> Optional[str]:
+    """If chaos broke the primary model, route every agent to the Claude fallback."""
+    if chaos_config and chaos_config.get("break_primary_model"):
+        return CLAUDE_MODEL_ID
+    return None
+
+
+def _prepare_observable(incident_id: str, chaos_config: Optional[Dict[str, Any]]) -> dict:
+    """Load the incident and apply chaos. Pure given (incident_id, chaos_config),
+    so both phases reconstruct the same observable without passing it around."""
+    obs = observable(get_incident(incident_id))
+    if _CHAOS_AVAILABLE and chaos_config:
+        try:
+            obs = _apply_chaos(obs, chaos_config)
+        except Exception:
+            pass
+    return obs
+
+
 # ---------------------------------------------------------------------------
 # Task prompt builders
 # ---------------------------------------------------------------------------
@@ -92,76 +125,6 @@ def _triage_prompt(obs: dict) -> str:
         "  SEV-2 — customer-facing, significant but contained degradation\n"
         "  SEV-3 — non-customer-facing or minor/partial degradation\n\n"
         "Set route_to to \"Diagnosis\" unless this is a confirmed false alarm."
-    )
-
-
-def _verification_prompt(obs: dict, diagnosis: dict, remediation: dict, approval: dict) -> str:
-    alert = obs.get("alert", "")
-    metrics = obs.get("telemetry", {}).get("metrics", {})
-    approved = approval.get("approved", False)
-    risky_note = (
-        f"  Risky actions (approved + executed): {json.dumps(remediation.get('risky', []))}"
-        if approved
-        else "  Risky actions: NOT executed (approval was denied)"
-    )
-    return (
-        "Remediation has been applied. Assess whether the incident has recovered.\n\n"
-        f"ORIGINAL ALERT: {alert}\n\n"
-        f"METRICS AT TIME OF INCIDENT:\n{json.dumps(metrics, indent=2)}\n\n"
-        f"DIAGNOSIS ROOT CAUSE: {diagnosis.get('root_cause', 'unknown')}\n\n"
-        f"APPROVAL: {'APPROVED' if approved else 'DENIED'} by {approval.get('approver', 'unknown')}\n\n"
-        "REMEDIATION APPLIED:\n"
-        f"  Safe actions (always executed): {json.dumps(remediation.get('safe', []))}\n"
-        f"{risky_note}\n\n"
-        "Reason about whether the applied actions directly address the root cause.\n"
-        "Identify the primary alerting metric from the alert and metrics above.\n\n"
-        "Output:\n"
-        "  recovered     — true if the applied actions resolve the root cause\n"
-        "  metric_name   — the primary metric that was alerting (e.g. checkout_error_rate)\n"
-        "  threshold     — the alert threshold for that metric (infer from the alert message)\n"
-        "  observed_value — estimated post-remediation value (below threshold if recovered)\n"
-        "  note          — one sentence explaining your recovery assessment"
-    )
-
-
-def _postmortem_prompt(
-    triage: dict, diagnosis: dict, remediation: dict, approval: dict, verification: dict
-) -> str:
-    return (
-        "Write a blameless postmortem for this incident.\n\n"
-        f"TRIAGE:\n{json.dumps(triage, indent=2)}\n\n"
-        f"DIAGNOSIS:\n{json.dumps(diagnosis, indent=2)}\n\n"
-        f"REMEDIATION PLAN:\n{json.dumps(remediation, indent=2)}\n\n"
-        f"APPROVAL:\n{json.dumps(approval, indent=2)}\n\n"
-        f"VERIFICATION:\n{json.dumps(verification, indent=2)}\n\n"
-        "Output requirements:\n"
-        "  summary      — 2-3 sentence executive summary: what broke, why, how it was fixed\n"
-        "  timeline     — ordered list of key events; use 't+Xmin' format if exact times unknown\n"
-        "  root_cause   — one precise sentence confirming the root cause\n"
-        "  actions_taken — list of remediation steps that were actually executed\n"
-        "  follow_ups   — concrete, specific action items (no generic advice); "
-        "each item should be a real ticket or task"
-    )
-
-
-def _remediation_prompt(obs: dict, diagnosis: dict) -> str:
-    return (
-        "The diagnosis is complete. Produce a concrete remediation plan.\n\n"
-        f"OBSERVABLE INCIDENT DATA:\n{json.dumps(obs, indent=2)}\n\n"
-        "DIAGNOSIS:\n"
-        f"  root_cause: {diagnosis.get('root_cause', 'unknown')}\n"
-        f"  confidence: {diagnosis.get('confidence', 0):.2f}\n"
-        f"  cited_evidence: {json.dumps(diagnosis.get('cited_evidence', []))}\n"
-        f"  reasoning: {diagnosis.get('reasoning', '')}\n\n"
-        "Produce a RemediationPlan with two lists:\n"
-        "  safe  — non-destructive actions (destructive=false): config changes, traffic shifts, "
-        "scale-ups. Can be applied immediately without approval.\n"
-        "  risky — destructive actions (destructive=true): rollbacks, restarts, data deletions. "
-        "These require human approval before execution.\n\n"
-        "Rules:\n"
-        "  - Be specific: name exact flags, services, and values — no generic advice\n"
-        "  - Aim for 1-3 safe actions and 1-2 risky actions\n"
-        "  - Set destructive=false for every action in safe, destructive=true for every action in risky"
     )
 
 
@@ -197,7 +160,6 @@ def _remediation_prompt(obs: dict, diagnosis: dict) -> str:
         "Prefer the least-destructive action that fixes the root cause. Every action must be specific "
         "to THIS incident — no generic boilerplate."
     )
-
 
 
 def _verification_prompt(obs: dict, diagnosis: dict, remediation: dict, approval: dict) -> str:
@@ -243,8 +205,11 @@ def _postmortem_prompt(
     )
 
 
+# ---------------------------------------------------------------------------
+# Crew runners — each stage is a sequential single-/dual-agent crew
+# ---------------------------------------------------------------------------
 def _run_single_agent(agent, description: str, expected_output: str, output_pydantic):
-    """Run one agent as a single-task sequential crew and return its parsed pydantic output (or None)."""
+    """Run one agent as a single-task sequential crew; return its parsed pydantic output (or None)."""
     task = Task(
         description=description,
         expected_output=expected_output,
@@ -257,10 +222,54 @@ def _run_single_agent(agent, description: str, expected_output: str, output_pyda
     return getattr(result.tasks_output[0], "pydantic", None)
 
 
+def _run_triage_diagnosis(
+    obs: dict, confidence: float, coverage_note: str, fallback: Optional[str]
+) -> Tuple[TriageReport, DiagnosisReport]:
+    triage_agent = build_triage_agent(model_id=fallback)
+    diagnosis_agent = build_diagnosis_agent(model_id=fallback)
+
+    triage_task = Task(
+        description=_triage_prompt(obs),
+        expected_output="Structured triage report classifying this incident.",
+        agent=triage_agent,
+        output_pydantic=TriageReport,
+    )
+    diagnosis_task = Task(
+        description=_diagnosis_prompt(obs, confidence, coverage_note),
+        expected_output="Structured diagnosis report identifying the root cause.",
+        agent=diagnosis_agent,
+        output_pydantic=DiagnosisReport,
+        context=[triage_task],
+    )
+
+    result = Crew(
+        agents=[triage_agent, diagnosis_agent],
+        tasks=[triage_task, diagnosis_task],
+        process=Process.sequential,
+        verbose=True,
+    ).kickoff()
+
+    triage = getattr(result.tasks_output[0], "pydantic", None) or TriageReport(
+        severity="SEV-2",
+        customer_facing=True,
+        summary="(parse error — see crew logs)",
+        route_to="Diagnosis",
+        reason="parse error",
+    )
+    raw_diag = getattr(result.tasks_output[1], "pydantic", None) or DiagnosisReport(
+        root_cause="(parse error — see crew logs)",
+        cited_evidence=[],
+        confidence=confidence,
+        reasoning="parse error",
+    )
+    # Override confidence with the deterministic pipeline value — never the LLM's number.
+    diagnosis = raw_diag.model_copy(update={"confidence": confidence})
+    return triage, diagnosis
+
+
 # ---------------------------------------------------------------------------
-# Parse-error fallbacks — only used if an agent's structured output fails to
-# parse. They are intentionally generic and labelled, never incident-specific
-# canned answers, so a parse failure can't masquerade as a real result.
+# Parse-error fallbacks — generic and labelled, never incident-specific canned
+# answers, so a parse failure can't masquerade as a real result.
 # ---------------------------------------------------------------------------
 def _fallback_plan() -> RemediationPlan:
     return RemediationPlan(
@@ -296,243 +305,139 @@ def _fallback_postmortem(root_cause: str) -> PostmortemReport:
 
 
 # ---------------------------------------------------------------------------
-# Flow state — persists data across all pipeline steps
+# Phase 1 — triage -> diagnosis -> remediation; stop before risky execution
 # ---------------------------------------------------------------------------
-class IncidentFlowState(BaseModel):
-    run_id: str = ""
-    incident_id: str = ""
-    chaos_config: Optional[Dict[str, Any]] = None
-    obs: dict = Field(default_factory=dict)
-    confidence: float = 1.0
-    coverage_note: str = ""
-    triage: Optional[Dict[str, Any]] = None
-    diagnosis: Optional[Dict[str, Any]] = None
-    remediation: Optional[Dict[str, Any]] = None
-    approval: Optional[Dict[str, Any]] = None
-    verification: Optional[Dict[str, Any]] = None
-    postmortem: Optional[Dict[str, Any]] = None
+def run_until_approval(
+    incident_id: str,
+    chaos_config: Optional[Dict[str, Any]] = None,
+    on_stage: Optional[Callable[[str, Any], None]] = None,
+) -> PartialRunResult:
+    on_stage = on_stage or _NOOP_STAGE
+    run_id = str(uuid.uuid4())
 
+    if _AUDIT_AVAILABLE:
+        _init_db()  # idempotent, per contract
 
-# ---------------------------------------------------------------------------
-# CrewAI Flow — event-driven pipeline orchestration
-# ---------------------------------------------------------------------------
-class IncidentResponseFlow(Flow[IncidentFlowState]):
-    """Flow-based incident response pipeline.
+    obs = _prepare_observable(incident_id, chaos_config)
+    confidence, coverage_note = _compute_confidence(obs["telemetry"])
+    fallback = _fallback_model(chaos_config)
 
-    Each step is an event-driven node connected via @start/@listen.
-    The Crew (triage + diagnosis agents) runs inside the diagnose step.
-    State is managed by Pydantic across all steps.
-    """
+    _log(run_id, "start", {"incident_id": incident_id, "chaos_config": chaos_config})
 
-    def __init__(self, approval_callback=None, **kwargs):
-        super().__init__(**kwargs)
-        self._approval_callback = approval_callback
+    triage, diagnosis = _run_triage_diagnosis(obs, confidence, coverage_note, fallback)
+    _log(run_id, "triage", triage.model_dump())
+    on_stage("triage", triage)
+    _log(run_id, "diagnosis", diagnosis.model_dump())
+    on_stage("diagnosis", diagnosis)
 
-    def _fallback_model(self) -> Optional[str]:
-        """If chaos broke the primary model, route every agent to the Claude fallback."""
-        if self.state.chaos_config and self.state.chaos_config.get("break_primary_model"):
-            return CLAUDE_MODEL_ID
-        return None
-
-    # Step 1: Load incident data and apply chaos
-    @start()
-    def load_and_prepare(self):
-        incident = get_incident(self.state.incident_id)
-        obs = observable(incident)
-
-        if _CHAOS_AVAILABLE and self.state.chaos_config:
-            try:
-                obs = _apply_chaos(obs, self.state.chaos_config)
-            except Exception:
-                pass
-
-        self.state.obs = obs
-        confidence, coverage_note = _compute_confidence(obs["telemetry"])
-        self.state.confidence = confidence
-        self.state.coverage_note = coverage_note
-
-        _log(self.state.run_id, "start", {
-            "incident_id": self.state.incident_id,
-            "chaos_config": self.state.chaos_config,
-        })
-        return "prepared"
-
-    # Step 2: Run triage + diagnosis crew
-    @listen(load_and_prepare)
-    def run_crew(self, _):
-        # If chaos broke the primary model, fall back to Claude via the gateway
-        fallback = self._fallback_model()
-
-        triage_agent = build_triage_agent(model_id=fallback)
-        diagnosis_agent = build_diagnosis_agent(model_id=fallback)
-
-        triage_task = Task(
-            description=_triage_prompt(self.state.obs),
-            expected_output="Structured triage report classifying this incident.",
-            agent=triage_agent,
-            output_pydantic=TriageReport,
-        )
-
-        diagnosis_task = Task(
-            description=_diagnosis_prompt(
-                self.state.obs, self.state.confidence, self.state.coverage_note
-            ),
-            expected_output="Structured diagnosis report identifying the root cause.",
-            agent=diagnosis_agent,
-            output_pydantic=DiagnosisReport,
-            context=[triage_task],
-        )
-
-        result = Crew(
-            agents=[triage_agent, diagnosis_agent],
-            tasks=[triage_task, diagnosis_task],
-            process=Process.sequential,
-            verbose=True,
-        ).kickoff()
-
-        # Extract pydantic outputs with fallbacks
-        triage: TriageReport = (
-            getattr(result.tasks_output[0], "pydantic", None)
-            or TriageReport(
-                severity="SEV-2",
-                customer_facing=True,
-                summary="(parse error — see crew logs)",
-                route_to="Diagnosis",
-                reason="parse error",
-            )
-        )
-
-        raw_diag: DiagnosisReport = (
-            getattr(result.tasks_output[1], "pydantic", None)
-            or DiagnosisReport(
-                root_cause="(parse error — see crew logs)",
-                cited_evidence=[],
-                confidence=self.state.confidence,
-                reasoning="parse error",
-            )
-        )
-
-        # Override confidence with deterministic pipeline value
-        diagnosis = raw_diag.model_copy(update={"confidence": self.state.confidence})
-
-        self.state.triage = triage.model_dump()
-        self.state.diagnosis = diagnosis.model_dump()
-
-        _log(self.state.run_id, "triage", self.state.triage)
-        _log(self.state.run_id, "diagnosis", self.state.diagnosis)
-        return "crew_done"
-
-    # Step 3: Remediation agent — root cause → safe/risky plan
-    @listen(run_crew)
-    def remediate(self, _):
-        agent = build_remediation_agent(model_id=self._fallback_model())
-        plan = _run_single_agent(
-            agent,
-            _remediation_prompt(self.state.obs, self.state.diagnosis),
+    plan = (
+        _run_single_agent(
+            build_remediation_agent(model_id=fallback),
+            _remediation_prompt(obs, diagnosis.model_dump()),
             "A remediation plan with safe[] and risky[] actions addressing the root cause.",
             RemediationPlan,
-        ) or _fallback_plan()
-        self.state.remediation = plan.model_dump()
-        _log(self.state.run_id, "remediation_plan", self.state.remediation)
-        return "remediation_done"
+        )
+        or _fallback_plan()
+    )
+    _log(run_id, "remediation", plan.model_dump())
+    on_stage("remediation", plan)
 
-    # Step 4: Human-in-the-loop approval gate
-    @listen(remediate)
-    def approve(self, _):
-        plan = RemediationPlan(**self.state.remediation)
+    return PartialRunResult(
+        run_id=run_id,
+        incident_id=incident_id,
+        triage=triage,
+        diagnosis=diagnosis,
+        remediation=plan,
+        chaos_config=chaos_config,
+    )
 
-        if self._approval_callback is not None:
-            decision = self._approval_callback(plan)
-        else:
-            decision = ApprovalDecision(
-                approved=True,
-                approver="auto-cli",
-                note="No approval_callback supplied; auto-approved per README contract",
-            )
 
-        self.state.approval = decision.model_dump()
-        _log(self.state.run_id, "approval", self.state.approval)
-        return "approval_done"
+# ---------------------------------------------------------------------------
+# Phase 2 — apply the decision, then verification -> postmortem
+# ---------------------------------------------------------------------------
+def resume_after_approval(
+    partial: PartialRunResult,
+    decision: ApprovalDecision,
+    on_stage: Optional[Callable[[str, Any], None]] = None,
+) -> RunResult:
+    on_stage = on_stage or _NOOP_STAGE
+    run_id = partial.run_id
 
-    # Step 5: Verification agent — does the recovery metric cross threshold?
-    @listen(approve)
-    def verify(self, _):
-        agent = build_verification_agent(model_id=self._fallback_model())
-        verification = _run_single_agent(
-            agent,
-            _verification_prompt(
-                self.state.obs, self.state.diagnosis, self.state.remediation, self.state.approval
-            ),
+    _log(run_id, "approval", decision.model_dump())
+    on_stage("approval", decision)
+
+    # Reconstruct the same observable the agents saw in phase 1 (pure transform).
+    obs = _prepare_observable(partial.incident_id, partial.chaos_config)
+    fallback = _fallback_model(partial.chaos_config)
+
+    diagnosis_d = partial.diagnosis.model_dump()
+    remediation_d = partial.remediation.model_dump()
+    approval_d = decision.model_dump()
+
+    verification = (
+        _run_single_agent(
+            build_verification_agent(model_id=fallback),
+            _verification_prompt(obs, diagnosis_d, remediation_d, approval_d),
             "A verification report stating the recovery metric, threshold, projected value, and recovered flag.",
             VerificationReport,
-        ) or _fallback_verification()
-        self.state.verification = verification.model_dump()
-        _log(self.state.run_id, "verification", self.state.verification)
-        return "verification_done"
+        )
+        or _fallback_verification()
+    )
+    _log(run_id, "verification", verification.model_dump())
+    on_stage("verification", verification)
 
-    # Step 6: Postmortem agent — synthesize the full run into a report
-    @listen(verify)
-    def write_postmortem(self, _):
-        agent = build_postmortem_agent(model_id=self._fallback_model())
-        postmortem = _run_single_agent(
-            agent,
+    postmortem = (
+        _run_single_agent(
+            build_postmortem_agent(model_id=fallback),
             _postmortem_prompt(
-                self.state.obs,
-                self.state.triage,
-                self.state.diagnosis,
-                self.state.remediation,
-                self.state.approval,
-                self.state.verification,
+                obs,
+                partial.triage.model_dump(),
+                diagnosis_d,
+                remediation_d,
+                approval_d,
+                verification.model_dump(),
             ),
             "A blameless postmortem with summary, timeline, root_cause, actions_taken, and follow_ups.",
             PostmortemReport,
-        ) or _fallback_postmortem(self.state.diagnosis.get("root_cause", ""))
-
-        self.state.postmortem = postmortem.model_dump()
-        _log(self.state.run_id, "postmortem", self.state.postmortem)
-        _log(
-            self.state.run_id,
-            "complete",
-            {"recovered": self.state.verification.get("recovered")},
         )
-        return "complete"
+        or _fallback_postmortem(diagnosis_d.get("root_cause", ""))
+    )
+    _log(run_id, "postmortem", postmortem.model_dump())
+    on_stage("postmortem", postmortem)
+    _log(run_id, "complete", {"recovered": verification.recovered})
+
+    return RunResult(
+        run_id=run_id,
+        incident_id=partial.incident_id,
+        triage=partial.triage,
+        diagnosis=partial.diagnosis,
+        remediation=partial.remediation,
+        approval=decision,
+        verification=verification,
+        postmortem=postmortem,
+        chaos_config=partial.chaos_config,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Public pipeline entrypoint — same signature, now powered by Flow
+# CLI / eval convenience wrapper — chains both phases synchronously
 # ---------------------------------------------------------------------------
 def run_incident(
     incident_id: str,
     chaos_config: Optional[Dict[str, Any]] = None,
     approval_callback: Optional[Callable[[RemediationPlan], ApprovalDecision]] = None,
 ) -> RunResult:
-    """Run the full incident-response pipeline for a given incident.
+    """Run the full pipeline end-to-end. `approval_callback` is called with the
+    RemediationPlan once it's ready; if None, risky actions are auto-approved."""
+    partial = run_until_approval(incident_id, chaos_config)
 
-    Internally uses a CrewAI Flow for event-driven orchestration.
-    The public signature is unchanged — Track B code works without modification.
-    """
-    run_id = str(uuid.uuid4())
+    if approval_callback is not None:
+        decision = approval_callback(partial.remediation)
+    else:
+        decision = ApprovalDecision(
+            approved=True,
+            approver="auto-cli",
+            note="No approval_callback supplied; auto-approved per contract",
+        )
 
-    # Ensure the audit tables exist before any stage logs (idempotent, per contract).
-    if _AUDIT_AVAILABLE:
-        _init_db()
-
-    flow = IncidentResponseFlow(approval_callback=approval_callback)
-    flow.state.run_id = run_id
-    flow.state.incident_id = incident_id
-    flow.state.chaos_config = chaos_config
-
-    flow.kickoff()
-
-    # Reconstruct RunResult from flow state
-    return RunResult(
-        run_id=run_id,
-        incident_id=incident_id,
-        triage=TriageReport(**flow.state.triage),
-        diagnosis=DiagnosisReport(**flow.state.diagnosis),
-        remediation=RemediationPlan(**flow.state.remediation),
-        approval=ApprovalDecision(**flow.state.approval),
-        verification=VerificationReport(**flow.state.verification),
-        postmortem=PostmortemReport(**flow.state.postmortem),
-        chaos_config=chaos_config,
-    )
+    return resume_after_approval(partial, decision)

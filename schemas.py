@@ -58,6 +58,22 @@ class PostmortemReport(BaseModel):
     follow_ups: list[str] = Field(description="Action items to prevent recurrence")
 
 
+class PartialRunResult(BaseModel):
+    """Everything produced up to (but not including) the human approval gate.
+
+    Returned by `pipeline.run_until_approval`. The FastAPI backend holds this in
+    memory keyed by `run_id` while it waits for a human decision, then passes it
+    to `pipeline.resume_after_approval` to finish the run. No risky action has
+    been executed at this point.
+    """
+    run_id: str = Field(description="UUID for this pipeline run")
+    incident_id: str = Field(description="The incident that was processed")
+    triage: TriageReport
+    diagnosis: DiagnosisReport
+    remediation: RemediationPlan
+    chaos_config: Optional[Dict[str, Any]] = Field(default=None, description="Chaos parameters injected for this run, if any")
+
+
 class RunResult(BaseModel):
     run_id: str = Field(description="UUID for this pipeline run")
     incident_id: str = Field(description="The incident that was processed")
