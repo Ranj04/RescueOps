@@ -1,17 +1,27 @@
-"""Incident response pipeline — sequential CrewAI crews behind a two-phase API.
+"""Incident response pipeline — sequential CrewAI crews with progressive autonomy.
+
+Core behavior after remediation produces safe[] and risky[]:
+  (a) every SAFE action is auto-executed with no human — that's the autonomy;
+  (b) if risky[] is EMPTY -> continue straight to verification + postmortem and
+      return a RESOLVED result with no pause — fully autonomous;
+  (c) if risky[] is non-empty -> stop and surface them for human approve/deny —
+      that's the governance.
 
 Public API:
-    run_until_approval(incident_id, chaos_config=None, on_stage=None) -> PartialRunResult
-        Stages 1-3 (triage -> diagnosis -> remediation). Stops BEFORE any risky
-        action is executed. The HTTP backend holds the returned partial in memory
-        while it waits for a human decision, so the request never blocks on a human.
+    run_until_approval(incident_id, chaos_config=None, on_stage=None) -> RunResult
+        Triage -> diagnosis -> remediation, then auto-executes safe actions and
+        either RESOLVES (no risky actions) or returns status="awaiting_approval"
+        with the pending risky actions. The HTTP backend holds the returned
+        RunResult in memory so the request never blocks on a human.
 
-    resume_after_approval(partial, decision, on_stage=None) -> RunResult
-        Stages 5-6 (verification -> postmortem), applying the approval decision.
+    resume_after_approval(result, decision, on_stage=None) -> RunResult
+        Executes approved risky actions, then verification -> postmortem; returns
+        a resolved RunResult. Only called when status was "awaiting_approval".
 
     run_incident(incident_id, chaos_config=None, approval_callback=None) -> RunResult
-        CLI/eval convenience wrapper that chains the two phases with a synchronous
-        approval callback (auto-approves if none supplied).
+        CLI/eval convenience wrapper: runs to approval; if already resolved
+        (autonomous path) returns it, otherwise applies a synchronous approval
+        callback (auto-approves if none supplied) and resumes.
 
 `on_stage(stage, artifact)` is an optional progress hook (used by the SSE stream in
 Phase 9). It is called with each pydantic artifact as it is produced; default no-op.
@@ -40,7 +50,6 @@ from incidents import get_incident, observable
 from schemas import (
     ApprovalDecision,
     DiagnosisReport,
-    PartialRunResult,
     PostmortemReport,
     RemediationAction,
     RemediationPlan,
@@ -48,6 +57,10 @@ from schemas import (
     TriageReport,
     VerificationReport,
 )
+
+# Run-status values carried on RunResult.status.
+STATUS_AWAITING = "awaiting_approval"
+STATUS_RESOLVED = "resolved"
 
 # ---------------------------------------------------------------------------
 # Optional Track-B dependencies — no-op if not yet available
@@ -120,10 +133,16 @@ def _triage_prompt(obs: dict) -> str:
         "A production alert has just fired. Classify it by severity and route it "
         "to the right specialist.\n\n"
         f"OBSERVABLE INCIDENT DATA:\n{json.dumps(obs, indent=2)}\n\n"
-        "Severity rules:\n"
-        "  SEV-1 — customer-facing, major revenue or safety impact, needs immediate escalation\n"
-        "  SEV-2 — customer-facing, significant but contained degradation\n"
-        "  SEV-3 — non-customer-facing or minor/partial degradation\n\n"
+        "SEVERITY RUBRIC (single source of truth — classify strictly by this):\n"
+        "- SEV-1 = full outage / service down / data loss. A core dependency that is fully "
+        "unavailable (availability 0 / unreachable) AND is cascading into systemwide overload "
+        "(e.g. a downstream datastore driven toward saturation) counts as a service-down "
+        "condition — SEV-1 — even if some user-facing requests still return.\n"
+        "- SEV-2 = customer-facing degradation (elevated errors or latency, but the service is up).\n"
+        "- SEV-3 = internal-only issue, no customer impact.\n\n"
+        "Pick the single best-fitting level. Evaluate SEV-1 first, then SEV-2, then SEV-3, and "
+        "choose the first level whose definition the incident clearly satisfies. Set `reason` to "
+        "name the matched rule explicitly (e.g. \"SEV-2: customer-facing latency, service still up\").\n"
         "Set route_to to \"Diagnosis\" unless this is a confirmed false alarm."
     )
 
@@ -157,6 +176,11 @@ def _remediation_prompt(obs: dict, diagnosis: dict) -> str:
         "resources, failing over, rotating credentials, changing data). These require human approval.\n\n"
         "For EACH action provide: action (imperative), rationale (tie it to the root cause), "
         "and destructive (true for risky, false for safe).\n"
+        "Include ONLY the actions you are actually executing now to resolve THIS incident. Do NOT add "
+        "speculative, contingency, or 'if the safe fix doesn't work then…' fallback actions — those do "
+        "not belong in the plan. An action is risky only if the real remediation genuinely requires a "
+        "destructive or irreversible step. If safe, reversible actions fully resolve the incident, then "
+        "risky[] MUST be empty — never manufacture risky actions to look thorough.\n"
         "Prefer the least-destructive action that fixes the root cause. Every action must be specific "
         "to THIS incident — no generic boilerplate."
     )
@@ -305,13 +329,79 @@ def _fallback_postmortem(root_cause: str) -> PostmortemReport:
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 — triage -> diagnosis -> remediation; stop before risky execution
+# Simulated action execution. Per the hard constraints there are no real cloud
+# integrations — "executing" an ops/runbook action means recording it to the
+# audit trail and surfacing it via on_stage. Safe actions run automatically;
+# risky ones only after approval.
+# ---------------------------------------------------------------------------
+def _execute_actions(
+    run_id: str,
+    actions: list[RemediationAction],
+    kind: str,
+    on_stage: Callable[[str, Any], None],
+) -> list[RemediationAction]:
+    for action in actions:
+        _log(run_id, f"execute_{kind}", action.model_dump())
+    on_stage(f"executed_{kind}", actions)
+    return list(actions)
+
+
+# ---------------------------------------------------------------------------
+# Shared tail: verification -> postmortem. Used by both the autonomous-resolve
+# path (no risky actions) and the resume-after-approval path.
+# ---------------------------------------------------------------------------
+def _run_verification_postmortem(
+    run_id: str,
+    obs: dict,
+    triage: TriageReport,
+    diagnosis: DiagnosisReport,
+    plan: RemediationPlan,
+    decision: ApprovalDecision,
+    fallback: Optional[str],
+    on_stage: Callable[[str, Any], None],
+) -> Tuple[VerificationReport, PostmortemReport]:
+    diagnosis_d = diagnosis.model_dump()
+    remediation_d = plan.model_dump()
+    approval_d = decision.model_dump()
+
+    verification = (
+        _run_single_agent(
+            build_verification_agent(model_id=fallback),
+            _verification_prompt(obs, diagnosis_d, remediation_d, approval_d),
+            "A verification report stating the recovery metric, threshold, projected value, and recovered flag.",
+            VerificationReport,
+        )
+        or _fallback_verification()
+    )
+    _log(run_id, "verification", verification.model_dump())
+    on_stage("verification", verification)
+
+    postmortem = (
+        _run_single_agent(
+            build_postmortem_agent(model_id=fallback),
+            _postmortem_prompt(
+                obs, triage.model_dump(), diagnosis_d, remediation_d,
+                approval_d, verification.model_dump(),
+            ),
+            "A blameless postmortem with summary, timeline, root_cause, actions_taken, and follow_ups.",
+            PostmortemReport,
+        )
+        or _fallback_postmortem(diagnosis_d.get("root_cause", ""))
+    )
+    _log(run_id, "postmortem", postmortem.model_dump())
+    on_stage("postmortem", postmortem)
+    return verification, postmortem
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — triage -> diagnosis -> remediation -> auto-execute safe; then either
+# resolve autonomously (no risky actions) or stop awaiting human approval.
 # ---------------------------------------------------------------------------
 def run_until_approval(
     incident_id: str,
     chaos_config: Optional[Dict[str, Any]] = None,
     on_stage: Optional[Callable[[str, Any], None]] = None,
-) -> PartialRunResult:
+) -> RunResult:
     on_stage = on_stage or _NOOP_STAGE
     run_id = str(uuid.uuid4())
 
@@ -342,97 +432,99 @@ def run_until_approval(
     _log(run_id, "remediation", plan.model_dump())
     on_stage("remediation", plan)
 
-    return PartialRunResult(
+    # (a) Auto-execute every safe action — no human in the loop. That's the autonomy.
+    executed_safe = _execute_actions(run_id, plan.safe, "safe", on_stage)
+
+    result = RunResult(
         run_id=run_id,
         incident_id=incident_id,
+        status=STATUS_AWAITING,
         triage=triage,
         diagnosis=diagnosis,
         remediation=plan,
+        executed_safe=executed_safe,
         chaos_config=chaos_config,
     )
 
+    # (b) No risky actions -> resolve autonomously, no pause.
+    if not plan.risky:
+        decision = ApprovalDecision(
+            approved=True,
+            approver="auto",
+            note="No risky actions proposed; resolved autonomously",
+        )
+        _log(run_id, "approval", decision.model_dump())
+        on_stage("approval", decision)
+        verification, postmortem = _run_verification_postmortem(
+            run_id, obs, triage, diagnosis, plan, decision, fallback, on_stage
+        )
+        _log(run_id, "complete", {"status": STATUS_RESOLVED, "recovered": verification.recovered})
+        return result.model_copy(update={
+            "status": STATUS_RESOLVED,
+            "approval": decision,
+            "verification": verification,
+            "postmortem": postmortem,
+        })
+
+    # (c) Risky actions present -> stop and surface them for a human decision.
+    _log(run_id, "awaiting_approval", {"risky_count": len(plan.risky)})
+    return result
+
 
 # ---------------------------------------------------------------------------
-# Phase 2 — apply the decision, then verification -> postmortem
+# Phase 2 — apply the human decision, execute approved risky actions, then
+# verification -> postmortem. Only called when status was "awaiting_approval".
 # ---------------------------------------------------------------------------
 def resume_after_approval(
-    partial: PartialRunResult,
+    result: RunResult,
     decision: ApprovalDecision,
     on_stage: Optional[Callable[[str, Any], None]] = None,
 ) -> RunResult:
     on_stage = on_stage or _NOOP_STAGE
-    run_id = partial.run_id
+    run_id = result.run_id
 
     _log(run_id, "approval", decision.model_dump())
     on_stage("approval", decision)
 
     # Reconstruct the same observable the agents saw in phase 1 (pure transform).
-    obs = _prepare_observable(partial.incident_id, partial.chaos_config)
-    fallback = _fallback_model(partial.chaos_config)
+    obs = _prepare_observable(result.incident_id, result.chaos_config)
+    fallback = _fallback_model(result.chaos_config)
 
-    diagnosis_d = partial.diagnosis.model_dump()
-    remediation_d = partial.remediation.model_dump()
-    approval_d = decision.model_dump()
+    # Execute approved risky actions (simulated); skip them entirely on denial.
+    if decision.approved:
+        _execute_actions(run_id, result.remediation.risky, "risky", on_stage)
 
-    verification = (
-        _run_single_agent(
-            build_verification_agent(model_id=fallback),
-            _verification_prompt(obs, diagnosis_d, remediation_d, approval_d),
-            "A verification report stating the recovery metric, threshold, projected value, and recovered flag.",
-            VerificationReport,
-        )
-        or _fallback_verification()
+    verification, postmortem = _run_verification_postmortem(
+        run_id, obs, result.triage, result.diagnosis, result.remediation,
+        decision, fallback, on_stage,
     )
-    _log(run_id, "verification", verification.model_dump())
-    on_stage("verification", verification)
+    _log(run_id, "complete", {"status": STATUS_RESOLVED, "recovered": verification.recovered})
 
-    postmortem = (
-        _run_single_agent(
-            build_postmortem_agent(model_id=fallback),
-            _postmortem_prompt(
-                obs,
-                partial.triage.model_dump(),
-                diagnosis_d,
-                remediation_d,
-                approval_d,
-                verification.model_dump(),
-            ),
-            "A blameless postmortem with summary, timeline, root_cause, actions_taken, and follow_ups.",
-            PostmortemReport,
-        )
-        or _fallback_postmortem(diagnosis_d.get("root_cause", ""))
-    )
-    _log(run_id, "postmortem", postmortem.model_dump())
-    on_stage("postmortem", postmortem)
-    _log(run_id, "complete", {"recovered": verification.recovered})
-
-    return RunResult(
-        run_id=run_id,
-        incident_id=partial.incident_id,
-        triage=partial.triage,
-        diagnosis=partial.diagnosis,
-        remediation=partial.remediation,
-        approval=decision,
-        verification=verification,
-        postmortem=postmortem,
-        chaos_config=partial.chaos_config,
-    )
+    return result.model_copy(update={
+        "status": STATUS_RESOLVED,
+        "approval": decision,
+        "verification": verification,
+        "postmortem": postmortem,
+    })
 
 
 # ---------------------------------------------------------------------------
-# CLI / eval convenience wrapper — chains both phases synchronously
+# CLI / eval convenience wrapper — autonomous when possible, else auto-approve
 # ---------------------------------------------------------------------------
 def run_incident(
     incident_id: str,
     chaos_config: Optional[Dict[str, Any]] = None,
     approval_callback: Optional[Callable[[RemediationPlan], ApprovalDecision]] = None,
 ) -> RunResult:
-    """Run the full pipeline end-to-end. `approval_callback` is called with the
-    RemediationPlan once it's ready; if None, risky actions are auto-approved."""
-    partial = run_until_approval(incident_id, chaos_config)
+    """Run the full pipeline end-to-end. If remediation produces no risky actions
+    the run resolves autonomously. Otherwise `approval_callback` is called with the
+    RemediationPlan; if None, risky actions are auto-approved."""
+    result = run_until_approval(incident_id, chaos_config)
+    if result.status == STATUS_RESOLVED:
+        return result  # fully autonomous — no risky actions to decide on
 
     if approval_callback is not None:
-        decision = approval_callback(partial.remediation)
+        decision = approval_callback(result.remediation)
     else:
         decision = ApprovalDecision(
             approved=True,
@@ -440,4 +532,4 @@ def run_incident(
             note="No approval_callback supplied; auto-approved per contract",
         )
 
-    return resume_after_approval(partial, decision)
+    return resume_after_approval(result, decision)

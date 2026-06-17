@@ -1,4 +1,4 @@
-"""FastAPI backend for RescueOps — two-phase, request/response.
+"""FastAPI backend for RescueOps — progressive autonomy, request/response.
 
 Run from the repo root:
     uvicorn api.server:app --reload
@@ -11,15 +11,19 @@ origin), so deploying is one container with one URL and no CORS.
 API endpoints (all prefixed /api):
     GET  /api/health                -> liveness probe
     GET  /api/incidents             -> list selectable incidents (no ground_truth)
-    POST /api/runs                  -> run triage..remediation, hold partial, return it
-    POST /api/runs/{run_id}/approve -> resume verification..postmortem, return RunResult
-    GET  /api/runs/{run_id}         -> fetch a completed RunResult (if finished)
+    POST /api/runs                  -> run to approval; safe actions auto-execute.
+                                       Returns a RunResult: status="resolved" when
+                                       there were no risky actions (fully autonomous),
+                                       or status="awaiting_approval" with pending risky.
+    POST /api/runs/{run_id}/approve -> resume: execute approved risky actions, then
+                                       verification..postmortem; returns resolved RunResult.
+    GET  /api/runs/{run_id}         -> fetch the current RunResult for a run_id.
     GET  /api/eval                  -> latest persisted eval summary (or null)
     POST /api/eval                  -> run evaluate_all() over all 5 incidents, return summary
 
-Run-state (the PartialRunResult between the two phases) is held in memory keyed by
-run_id. The audit trail still persists to SQLite via pipeline's per-stage logging,
-so a server restart loses in-flight runs but never the recorded history.
+Run-state (the RunResult) is held in memory keyed by run_id. The audit trail still
+persists to SQLite via pipeline's per-stage logging, so a server restart loses
+in-flight runs but never the recorded history.
 """
 from __future__ import annotations
 
@@ -34,7 +38,7 @@ from pydantic import BaseModel, Field
 import incidents
 from evaluation import evaluate_all, get_latest_eval
 from pipeline import resume_after_approval, run_until_approval
-from schemas import ApprovalDecision, PartialRunResult, RunResult
+from schemas import ApprovalDecision, RunResult
 
 app = FastAPI(title="RescueOps API", version="1.0")
 api = APIRouter(prefix="/api")
@@ -48,9 +52,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory run-state, keyed by run_id. Audit history persists separately in SQLite.
-_PARTIALS: Dict[str, PartialRunResult] = {}
-_RESULTS: Dict[str, RunResult] = {}
+# In-memory run-state, keyed by run_id. A single dict holds the RunResult through
+# its whole lifecycle (awaiting_approval -> resolved). Audit history persists
+# separately in SQLite, so a restart loses in-flight runs but never the history.
+_RUNS: Dict[str, RunResult] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -92,41 +97,47 @@ def list_incidents() -> list[IncidentSummary]:
     ]
 
 
-@api.post("/runs", response_model=PartialRunResult)
-def start_run(req: RunRequest) -> PartialRunResult:
-    """Phase 1: triage -> diagnosis -> remediation. Stops before risky execution
-    and holds the partial in memory so the HTTP request never blocks on a human."""
+@api.post("/runs", response_model=RunResult)
+def start_run(req: RunRequest) -> RunResult:
+    """Run to approval: triage -> diagnosis -> remediation, auto-executing safe
+    actions. Returns a resolved RunResult when there were no risky actions (fully
+    autonomous), or status="awaiting_approval" with the pending risky actions held
+    in memory so the HTTP request never blocks on a human."""
     try:
         incidents.get_incident(req.incident_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown incident: {req.incident_id}")
 
-    partial = run_until_approval(req.incident_id, req.chaos_config)
-    _PARTIALS[partial.run_id] = partial
-    return partial
+    result = run_until_approval(req.incident_id, req.chaos_config)
+    _RUNS[result.run_id] = result
+    return result
 
 
 @api.post("/runs/{run_id}/approve", response_model=RunResult)
 def approve_run(run_id: str, req: ApproveRequest) -> RunResult:
-    """Phase 2: apply the human decision, then verification -> postmortem."""
-    partial = _PARTIALS.get(run_id)
-    if partial is None:
+    """Apply the human decision on the pending risky actions, then run
+    verification -> postmortem and return the resolved RunResult."""
+    result = _RUNS.get(run_id)
+    if result is None:
         raise HTTPException(status_code=404, detail=f"Unknown or expired run: {run_id}")
+    if result.status != "awaiting_approval":
+        # Already resolved (e.g. the autonomous path) — nothing to approve.
+        return result
 
     decision = ApprovalDecision(
         approved=req.approved, approver=req.approver, note=req.note
     )
-    result = resume_after_approval(partial, decision)
-    _RESULTS[run_id] = result
-    return result
+    resolved = resume_after_approval(result, decision)
+    _RUNS[run_id] = resolved
+    return resolved
 
 
 @api.get("/runs/{run_id}", response_model=RunResult)
 def get_run_result(run_id: str) -> RunResult:
-    """Fetch a completed RunResult (404 until the run has been approved/resumed)."""
-    result = _RESULTS.get(run_id)
+    """Fetch the current RunResult for a run_id (awaiting_approval or resolved)."""
+    result = _RUNS.get(run_id)
     if result is None:
-        raise HTTPException(status_code=404, detail=f"No completed run: {run_id}")
+        raise HTTPException(status_code=404, detail=f"Unknown or expired run: {run_id}")
     return result
 
 

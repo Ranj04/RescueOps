@@ -58,29 +58,37 @@ class PostmortemReport(BaseModel):
     follow_ups: list[str] = Field(description="Action items to prevent recurrence")
 
 
-class PartialRunResult(BaseModel):
-    """Everything produced up to (but not including) the human approval gate.
+class RunResult(BaseModel):
+    """The full state of an incident run at whatever stage it has reached.
 
-    Returned by `pipeline.run_until_approval`. The FastAPI backend holds this in
-    memory keyed by `run_id` while it waits for a human decision, then passes it
-    to `pipeline.resume_after_approval` to finish the run. No risky action has
-    been executed at this point.
+    Progressive autonomy means a run finishes in one of two ways:
+      - status="resolved"          — fully done; verification + postmortem present.
+                                      Reached AUTONOMOUSLY when remediation produced
+                                      no risky actions, or after a human decides on
+                                      the risky ones.
+      - status="awaiting_approval" — safe actions have already been auto-executed
+                                      (see `executed_safe`); one or more risky
+                                      actions are pending a human decision.
+                                      `approval`/`verification`/`postmortem` are null.
     """
     run_id: str = Field(description="UUID for this pipeline run")
     incident_id: str = Field(description="The incident that was processed")
+    status: str = Field(description='"awaiting_approval" or "resolved"')
     triage: TriageReport
     diagnosis: DiagnosisReport
     remediation: RemediationPlan
-    chaos_config: Optional[Dict[str, Any]] = Field(default=None, description="Chaos parameters injected for this run, if any")
-
-
-class RunResult(BaseModel):
-    run_id: str = Field(description="UUID for this pipeline run")
-    incident_id: str = Field(description="The incident that was processed")
-    triage: TriageReport
-    diagnosis: DiagnosisReport
-    remediation: RemediationPlan
-    approval: ApprovalDecision
-    verification: VerificationReport
-    postmortem: PostmortemReport
+    executed_safe: list[RemediationAction] = Field(
+        default_factory=list,
+        description="Safe actions auto-executed without a human approval gate",
+    )
+    approval: Optional[ApprovalDecision] = Field(
+        default=None,
+        description="Null until a risky-action decision is made (auto when no risky actions)",
+    )
+    verification: Optional[VerificationReport] = Field(
+        default=None, description="Null until the run is resolved"
+    )
+    postmortem: Optional[PostmortemReport] = Field(
+        default=None, description="Null until the run is resolved"
+    )
     chaos_config: Optional[Dict[str, Any]] = Field(default=None, description="Chaos parameters injected for this run, if any")

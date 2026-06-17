@@ -55,7 +55,7 @@
         ]
       },
       "ground_truth": {
-        "severity": "SEV-3",
+        "severity": "SEV-2",
         "root_cause": "Deploy payment-v17 changed the fraud-check from async to a synchronous inline call, adding ~3.6s per request to p99 latency. Error rate is unaffected.",
         "expected_evidence": ["payment_p99_latency_ms", "fraud_check_call_ms", "deploy payment-v17"],
         "remediation": {
@@ -96,33 +96,34 @@
       }
     },
     {
-      "id": "INC-004-logging-disk-full",
-      "title": "Logging node disk full",
-      "alert": "Log ingestion failing; logging-node-2 disk at 100%.",
+      "id": "INC-004-autoscaler-underprovisioned",
+      "title": "API gateway latency from autoscaler under-provisioning",
+      "alert": "api-gateway p95 latency at 3.1x baseline (430ms); pods CPU-throttled.",
       "telemetry": {
         "logs": [
-          "ERROR fluentd: write failed: no space left on device (/var/log)",
-          "WARN  logging-node-2: disk usage 100% (was 71% one hour ago)",
-          "INFO  logrotate: last successful rotation 9 days ago",
-          "WARN  app-svc: log shipping buffer full, dropping log lines"
+          "INFO  ops: maintenance window MAINT-2231 lowered api-gateway HPA minReplicas 6 -> 2 at 02:00 UTC; the post-maintenance restore step was skipped",
+          "WARN  api-gateway: CPU throttling active on all pods (cfs throttled 78% of periods)",
+          "INFO  hpa/api-gateway: desiredReplicas pinned at minReplicas=2 despite high CPU; no reconciler or deploy is re-applying the value",
+          "INFO  api-gateway: all requests returning 200; latency elevated under load"
         ],
         "metrics": {
-          "logging_node2_disk_pct": {"before": 71, "now": 100},
-          "log_ingestion_success_rate": {"before": 1.0, "now": 0.0},
-          "app_error_rate": {"before": 0.01, "now": 0.01},
-          "log_buffer_dropped_lines_per_min": {"before": 0, "now": 52000}
+          "gateway_p95_latency_ms": {"before": 140, "now": 430},
+          "api_gateway_replicas": {"before": 6, "now": 2},
+          "hpa_min_replicas": {"before": 6, "now": 2},
+          "cpu_throttle_pct": {"before": 3, "now": 78},
+          "gateway_error_rate": {"before": 0.002, "now": 0.003}
         },
         "deploys": []
       },
       "ground_truth": {
-        "severity": "SEV-3",
-        "root_cause": "logrotate stopped running 9 days ago, so logs accumulated until logging-node-2 hit 100% disk and ingestion failed. Application traffic itself is healthy.",
-        "expected_evidence": ["logging_node2_disk_pct", "logrotate last rotation 9 days ago", "log_ingestion_success_rate"],
+        "severity": "SEV-2",
+        "root_cause": "During maintenance window MAINT-2231 an operator lowered api-gateway HPA minReplicas from 6 to 2 and the post-maintenance restore was skipped; with only 2 pods under normal traffic the pods CPU-throttled and p95 latency tripled. Requests still succeed — no code or data fault, and nothing is re-applying the change, so restoring capacity fully resolves it.",
+        "expected_evidence": ["hpa_min_replicas", "gateway_p95_latency_ms", "cpu_throttle_pct"],
         "remediation": {
-          "safe": ["Compress and archive old logs to object storage", "Re-enable / fix the logrotate cron"],
-          "risky": ["Force-delete old log files to free disk", "Expand the logging volume"]
+          "safe": ["Scale api-gateway back to 6 replicas", "Restore HPA minReplicas to 6 in the autoscaling config", "Add an alert on hpa_min_replicas below the configured floor"],
+          "risky": []
         },
-        "recovery_metric": {"name": "logging_node2_disk_pct", "below": 80}
+        "recovery_metric": {"name": "gateway_p95_latency_ms", "below": 200}
       }
     },
     {

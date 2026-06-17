@@ -63,9 +63,15 @@ export default function App() {
     setPartial(null);
     setPhase("running");
     try {
-      const p = await api.startRun(selectedId, chaosConfig());
-      setPartial(p);
-      setPhase("awaiting_approval");
+      const r = await api.startRun(selectedId, chaosConfig());
+      setPartial(r);
+      if (r.status === "resolved") {
+        // Fully autonomous — no risky actions, so it ran to completion with no gate.
+        setResult(r);
+        setPhase("done");
+      } else {
+        setPhase("awaiting_approval");
+      }
     } catch (e) {
       setError(e.message);
       setPhase("idle");
@@ -205,7 +211,18 @@ export default function App() {
                   diagnosis={partial.diagnosis}
                   chaosActive={!!partial.chaos_config}
                 />
-                <RemediationPanel remediation={partial.remediation} />
+                <RemediationPanel
+                  remediation={partial.remediation}
+                  executedSafe={partial.executed_safe}
+                />
+
+                {phase === "done" && partial.status === "resolved" &&
+                  !partial.remediation.risky.length && (
+                    <div className="empty" style={{ color: "var(--green)" }}>
+                      ✓ Resolved autonomously — no risky actions, so the safe fixes
+                      were applied without a human gate.
+                    </div>
+                  )}
 
                 {phase === "awaiting_approval" && (
                   <ApprovalBar

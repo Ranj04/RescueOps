@@ -168,12 +168,23 @@ function ActionList({ actions, tone }) {
   );
 }
 
-export function RemediationPanel({ remediation }) {
+export function RemediationPanel({ remediation, executedSafe }) {
+  const safe = executedSafe && executedSafe.length ? executedSafe : remediation.safe;
+  const hasRisky = remediation.risky.length > 0;
   return (
-    <Card title="③ Remediation Plan">
-      <h4 className="safe-h">Safe — execute immediately</h4>
-      <ActionList actions={remediation.safe} tone="good" />
-      <h4 className="risky-h">Risky — require approval</h4>
+    <Card
+      title="③ Remediation Plan"
+      badge={
+        safe.length ? (
+          <Pill tone="good">{safe.length} safe auto-applied</Pill>
+        ) : null
+      }
+    >
+      <h4 className="safe-h">Safe — auto-executed ✓</h4>
+      <ActionList actions={safe} tone="good" />
+      <h4 className="risky-h">
+        {hasRisky ? "Risky — require approval" : "Risky — none proposed"}
+      </h4>
       <ActionList actions={remediation.risky} tone="danger" />
     </Card>
   );

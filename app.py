@@ -58,8 +58,10 @@ _CSS = """
 .stApp {
     background-color: var(--bg) !important;
     font-family: "Inter Tight", system-ui, -apple-system, sans-serif !important;
-    letter-spacing: -0.011em;
+    letter-spacing: -0.005em;
     color: var(--fg) !important;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
 }
 
 .stApp::before {
@@ -87,29 +89,35 @@ _CSS = """
 /* ── Typography ── */
 h1, .stApp h1 {
     font-family: "Inter Tight", system-ui, sans-serif !important;
-    font-weight: 800 !important;
-    letter-spacing: -0.045em !important;
-    line-height: 1.0 !important;
-    font-size: 2.75rem !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.025em !important;
+    line-height: 1.15 !important;
+    font-size: 2.6rem !important;
     color: var(--fg) !important;
 }
 h2, .stApp h2 {
     font-family: "Inter Tight", system-ui, sans-serif !important;
-    font-weight: 700 !important;
-    letter-spacing: -0.035em !important;
+    font-weight: 600 !important;
+    letter-spacing: -0.02em !important;
     font-size: 1.5rem !important;
+    line-height: 1.25 !important;
     color: var(--fg) !important;
 }
 h3, .stApp h3 {
     font-family: "Inter Tight", system-ui, sans-serif !important;
     font-weight: 600 !important;
-    letter-spacing: -0.02em !important;
+    letter-spacing: -0.012em !important;
     font-size: 1.15rem !important;
+    line-height: 1.3 !important;
     color: var(--fg) !important;
 }
 p, li, span, .stMarkdown {
     font-family: "Inter Tight", system-ui, sans-serif !important;
-    letter-spacing: -0.011em;
+    letter-spacing: -0.003em;
+    line-height: 1.6 !important;
+}
+.stApp p, .stApp li, .stMarkdown p, .stMarkdown li {
+    color: var(--fg-2);
 }
 code, .stCode, [data-testid="stCode"] {
     font-family: "JetBrains Mono", "Fira Code", monospace !important;
@@ -224,9 +232,9 @@ section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
 }
 [data-testid="stMetric"] [data-testid="stMetricValue"] {
     font-family: "Inter Tight", system-ui, sans-serif !important;
-    font-weight: 800 !important;
+    font-weight: 600 !important;
     font-size: 1.8rem !important;
-    letter-spacing: -0.04em !important;
+    letter-spacing: -0.025em !important;
 }
 
 /* ── Expander ── */
@@ -301,10 +309,10 @@ footer { display: none !important; }
 }
 .ro-hero-title {
     font-family: "Inter Tight", system-ui, sans-serif;
-    font-weight: 900;
-    font-size: 2.5rem;
-    letter-spacing: -0.055em;
-    line-height: 1;
+    font-weight: 750;
+    font-size: 2.4rem;
+    letter-spacing: -0.03em;
+    line-height: 1.08;
     color: var(--fg);
 }
 .ro-hero-title .accent { color: var(--accent); }
@@ -344,9 +352,9 @@ footer { display: none !important; }
 }
 .sb-brand {
     font-family: "Inter Tight", system-ui, sans-serif;
-    font-weight: 800;
+    font-weight: 700;
     font-size: 1.2rem;
-    letter-spacing: -0.04em;
+    letter-spacing: -0.025em;
     color: var(--fg);
     margin-bottom: 0.25rem;
 }
@@ -368,18 +376,18 @@ footer { display: none !important; }
 /* ── Section header ── */
 .sec-header {
     font-family: "Inter Tight", system-ui, sans-serif;
-    font-weight: 800;
+    font-weight: 650;
     font-size: 1.6rem;
-    letter-spacing: -0.04em;
-    line-height: 1.1;
+    letter-spacing: -0.025em;
+    line-height: 1.2;
     color: var(--fg);
 }
 .sec-sub {
     font-family: "Inter Tight", system-ui, sans-serif;
-    font-size: 0.82rem;
+    font-size: 0.85rem;
     color: var(--muted-fg);
-    line-height: 1.5;
-    margin-top: 0.25rem;
+    line-height: 1.6;
+    margin-top: 0.35rem;
 }
 
 /* ── Timeline stage ── */
@@ -443,9 +451,9 @@ footer { display: none !important; }
 }
 .tl-title {
     font-family: "Inter Tight", system-ui, sans-serif;
-    font-weight: 700;
-    font-size: 0.95rem;
-    letter-spacing: -0.015em;
+    font-weight: 600;
+    font-size: 1rem;
+    letter-spacing: -0.01em;
     color: var(--fg);
     margin-bottom: 0.1rem;
 }
@@ -487,18 +495,18 @@ footer { display: none !important; }
 }
 .m-val {
     font-family: "Inter Tight", system-ui, sans-serif;
-    font-weight: 800;
+    font-weight: 600;
     font-size: 1.5rem;
-    letter-spacing: -0.04em;
+    letter-spacing: -0.025em;
     color: var(--fg);
-    line-height: 1.15;
+    line-height: 1.2;
 }
 .m-val.red { color: var(--accent); }
 .m-val.green { color: var(--green); }
 .m-val.amber { color: var(--amber); }
 .m-val.lg {
     font-size: 2.25rem;
-    letter-spacing: -0.05em;
+    letter-spacing: -0.03em;
 }
 
 /* ── Evidence ── */

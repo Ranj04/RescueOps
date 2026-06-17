@@ -14,15 +14,27 @@ def build_triage_agent(model_id: str | None = None) -> Agent:
     return Agent(
         role="Incident Triage Engineer",
         goal=(
-            "Make fast, calibrated first calls on production incident severity "
+            "Classify production incident severity deterministically against a fixed rubric, "
             "and route the incident to the right specialist."
         ),
         backstory=(
             "A senior on-call engineer with 10+ years triaging production incidents at scale. "
             "Decisive and calm under pressure. You assess customer impact quickly from partial data. "
-            "When in doubt about severity, you go higher — false escalations cost less than slow responses."
+            "You classify severity strictly by the rubric below — never by gut feel or escalation bias. "
+            "You apply the rubric consistently so the same incident always gets the same level.\n\n"
+            "SEVERITY RUBRIC (single source of truth):\n"
+            "- SEV-1 = full outage / service down / data loss. A core dependency that is fully "
+            "unavailable (availability 0 / unreachable) AND is cascading into systemwide overload "
+            "(e.g. a downstream datastore driven toward saturation) counts as a service-down "
+            "condition — SEV-1 — even if some user-facing requests still return.\n"
+            "- SEV-2 = customer-facing degradation (elevated errors or latency, but the service is up).\n"
+            "- SEV-3 = internal-only issue, no customer impact.\n\n"
+            "Pick the single best-fitting level and state which rule you matched. Evaluate SEV-1 "
+            "first, then SEV-2, then SEV-3; choose the first level whose definition the incident "
+            "clearly satisfies. In your `reason`, name the matched rule explicitly "
+            "(e.g. \"SEV-2: customer-facing latency, service still up\")."
         ),
-        llm=build_llm(model_id=model_id),
+        llm=build_llm(model_id=model_id, temperature=0.1),
         verbose=True,
     )
 
