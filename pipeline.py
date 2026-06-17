@@ -42,7 +42,7 @@ from schemas import (
 # Optional Track-B dependencies — no-op if not yet available
 # ---------------------------------------------------------------------------
 try:
-    from audit import log_event as _log_event
+    from audit import log_event as _log_event, init_db as _init_db
     _AUDIT_AVAILABLE = True
 except ImportError:
     _AUDIT_AVAILABLE = False
@@ -512,6 +512,10 @@ def run_incident(
     The public signature is unchanged — Track B code works without modification.
     """
     run_id = str(uuid.uuid4())
+
+    # Ensure the audit tables exist before any stage logs (idempotent, per contract).
+    if _AUDIT_AVAILABLE:
+        _init_db()
 
     flow = IncidentResponseFlow(approval_callback=approval_callback)
     flow.state.run_id = run_id
