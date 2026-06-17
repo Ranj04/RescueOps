@@ -120,7 +120,7 @@
         "root_cause": "During maintenance window MAINT-2231 an operator lowered api-gateway HPA minReplicas from 6 to 2 and the post-maintenance restore was skipped; with only 2 pods under normal traffic the pods CPU-throttled and p95 latency tripled. Requests still succeed — no code or data fault, and nothing is re-applying the change, so restoring capacity fully resolves it.",
         "expected_evidence": ["hpa_min_replicas", "gateway_p95_latency_ms", "cpu_throttle_pct"],
         "remediation": {
-          "safe": ["Scale api-gateway back to 6 replicas", "Restore HPA minReplicas to 6 in the autoscaling config", "Add an alert on hpa_min_replicas below the configured floor"],
+          "safe": ["Scale api-gateway back to 6 replicas", "Restore HPA minReplicas to 6", "Add an alert on hpa_min_replicas below the configured floor"],
           "risky": []
         },
         "recovery_metric": {"name": "gateway_p95_latency_ms", "below": 200}

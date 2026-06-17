@@ -18,30 +18,55 @@ from schemas import ApprovalDecision, RemediationPlan
 
 _DB_PATH = Path(__file__).parent / "rescueops_audit.db"
 
-# Fuzzy-match threshold for word-set overlap (Jaccard) between strings.
-_OVERLAP_THRESHOLD = 0.34
+# A terse ground-truth phrase counts as "covered" by a produced action when at
+# least this fraction of its salient words appear in that action. Directional
+# (coverage of EXPECTED by PRODUCED), so a short canonical label still matches a
+# verbose produced action — symmetric Jaccard over the union would score ~0.
+_COVERAGE_THRESHOLD = 0.5
+
+# Generic filler dropped before comparison so only content words count.
+_STOPWORDS = {
+    "the", "a", "an", "to", "of", "on", "in", "and", "or", "for", "with", "via",
+    "by", "from", "then", "if", "is", "are", "be", "that", "this", "it", "its",
+    "as", "at", "back", "old", "new", "any", "all", "one",
+}
 
 
 def _auto_approve(plan: RemediationPlan) -> ApprovalDecision:
     return ApprovalDecision(approved=True, approver="auto-eval", note="auto-approved for eval")
 
 
-def _norm_words(text: str) -> set[str]:
-    return {w for w in "".join(c.lower() if c.isalnum() else " " for c in text).split() if w}
+def _salient_words(text: str) -> set[str]:
+    """Content words of `text`: lowercased alnum tokens >2 chars, minus stopwords."""
+    words = "".join(c.lower() if c.isalnum() else " " for c in text).split()
+    return {w for w in words if len(w) > 2 and w not in _STOPWORDS}
 
 
-def _fuzzy_match(a: str, b: str) -> bool:
-    """True if a and b are 'the same item' — substring either way, or enough word overlap."""
-    al, bl = a.lower().strip(), b.lower().strip()
-    if not al or not bl:
-        return False
-    if al in bl or bl in al:
+def _word_found(expected_word: str, produced_words: set[str]) -> bool:
+    """An expected word is present if it matches exactly, or (for words >=4 chars)
+    one produced word is a morphological variant — substring either way, e.g.
+    deploy/deployment, postgres/postgresql, roll(back), concurrency."""
+    if expected_word in produced_words:
         return True
-    wa, wb = _norm_words(a), _norm_words(b)
-    if not wa or not wb:
+    if len(expected_word) >= 4:
+        return any(expected_word in pw or pw in expected_word for pw in produced_words)
+    return False
+
+
+def _fuzzy_match(expected: str, produced: str) -> bool:
+    """True if `produced` covers `expected` — substring either way, or at least
+    _COVERAGE_THRESHOLD of `expected`'s salient words appear in `produced`."""
+    e, p = expected.lower().strip(), produced.lower().strip()
+    if not e or not p:
         return False
-    jaccard = len(wa & wb) / len(wa | wb)
-    return jaccard >= _OVERLAP_THRESHOLD
+    if e in p or p in e:
+        return True
+    we = _salient_words(expected)
+    if not we:
+        return False
+    wp = _salient_words(produced)
+    coverage = sum(_word_found(w, wp) for w in we) / len(we)
+    return coverage >= _COVERAGE_THRESHOLD
 
 
 def _recall(expected: list[str], produced: list[str]) -> float:
