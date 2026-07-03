@@ -26,7 +26,7 @@ Public API:
 `on_stage(stage, artifact)` is an optional progress hook (used by the SSE stream in
 Phase 9). It is called with each pydantic artifact as it is produced; default no-op.
 
-Every LLM call routes through `config.build_llm` -> the TrueFoundry gateway.
+Every incident-model binding routes through `llm_client`.
 Confidence is computed deterministically from telemetry coverage, never by an LLM.
 """
 from __future__ import annotations
@@ -45,8 +45,9 @@ from agents import (
     build_triage_agent,
     build_verification_agent,
 )
-from config import CLAUDE_MODEL_ID
-from incidents import get_incident, observable
+from incidents import get_incident, load_rubric, observable
+from llm_client import begin_model_run
+from policy import load_policy
 from schemas import (
     ApprovalDecision,
     DiagnosisReport,
@@ -61,6 +62,9 @@ from schemas import (
 # Run-status values carried on RunResult.status.
 STATUS_AWAITING = "awaiting_approval"
 STATUS_RESOLVED = "resolved"
+
+# Policy errors must stop the process during import rather than surfacing mid-incident.
+POLICY = load_policy()
 
 # ---------------------------------------------------------------------------
 # Optional Track-B dependencies — no-op if not yet available
@@ -106,13 +110,6 @@ def _compute_confidence(telemetry: dict) -> Tuple[float, str]:
     return confidence, note
 
 
-def _fallback_model(chaos_config: Optional[Dict[str, Any]]) -> Optional[str]:
-    """If chaos broke the primary model, route every agent to the Claude fallback."""
-    if chaos_config and chaos_config.get("break_primary_model"):
-        return CLAUDE_MODEL_ID
-    return None
-
-
 def _prepare_observable(incident_id: str, chaos_config: Optional[Dict[str, Any]]) -> dict:
     """Load the incident and apply chaos. Pure given (incident_id, chaos_config),
     so both phases reconstruct the same observable without passing it around."""
@@ -128,21 +125,13 @@ def _prepare_observable(incident_id: str, chaos_config: Optional[Dict[str, Any]]
 # ---------------------------------------------------------------------------
 # Task prompt builders
 # ---------------------------------------------------------------------------
-def _triage_prompt(obs: dict) -> str:
+def _triage_prompt(obs: dict, rubric: str) -> str:
     return (
         "A production alert has just fired. Classify it by severity and route it "
         "to the right specialist.\n\n"
         f"OBSERVABLE INCIDENT DATA:\n{json.dumps(obs, indent=2)}\n\n"
-        "SEVERITY RUBRIC (single source of truth — classify strictly by this):\n"
-        "- SEV-1 = full outage / service down / data loss. A core dependency that is fully "
-        "unavailable (availability 0 / unreachable) AND is cascading into systemwide overload "
-        "(e.g. a downstream datastore driven toward saturation) counts as a service-down "
-        "condition — SEV-1 — even if some user-facing requests still return.\n"
-        "- SEV-2 = customer-facing degradation (elevated errors or latency, but the service is up).\n"
-        "- SEV-3 = internal-only issue, no customer impact.\n\n"
-        "Pick the single best-fitting level. Evaluate SEV-1 first, then SEV-2, then SEV-3, and "
-        "choose the first level whose definition the incident clearly satisfies. Set `reason` to "
-        "name the matched rule explicitly (e.g. \"SEV-2: customer-facing latency, service still up\").\n"
+        f"SEVERITY RUBRIC (single source of truth — classify strictly by this):\n{rubric}\n\n"
+        "Pick the single best-fitting level and set `reason` to name the matched rule explicitly.\n"
         "Set route_to to \"Diagnosis\" unless this is a confirmed false alarm."
     )
 
@@ -247,13 +236,13 @@ def _run_single_agent(agent, description: str, expected_output: str, output_pyda
 
 
 def _run_triage_diagnosis(
-    obs: dict, confidence: float, coverage_note: str, fallback: Optional[str]
+    obs: dict, rubric: str, confidence: float, coverage_note: str
 ) -> Tuple[TriageReport, DiagnosisReport]:
-    triage_agent = build_triage_agent(model_id=fallback)
-    diagnosis_agent = build_diagnosis_agent(model_id=fallback)
+    triage_agent = build_triage_agent(rubric=rubric)
+    diagnosis_agent = build_diagnosis_agent()
 
     triage_task = Task(
-        description=_triage_prompt(obs),
+        description=_triage_prompt(obs, rubric),
         expected_output="Structured triage report classifying this incident.",
         agent=triage_agent,
         output_pydantic=TriageReport,
@@ -357,7 +346,6 @@ def _run_verification_postmortem(
     diagnosis: DiagnosisReport,
     plan: RemediationPlan,
     decision: ApprovalDecision,
-    fallback: Optional[str],
     on_stage: Callable[[str, Any], None],
 ) -> Tuple[VerificationReport, PostmortemReport]:
     diagnosis_d = diagnosis.model_dump()
@@ -366,7 +354,7 @@ def _run_verification_postmortem(
 
     verification = (
         _run_single_agent(
-            build_verification_agent(model_id=fallback),
+            build_verification_agent(),
             _verification_prompt(obs, diagnosis_d, remediation_d, approval_d),
             "A verification report stating the recovery metric, threshold, projected value, and recovered flag.",
             VerificationReport,
@@ -378,7 +366,7 @@ def _run_verification_postmortem(
 
     postmortem = (
         _run_single_agent(
-            build_postmortem_agent(model_id=fallback),
+            build_postmortem_agent(),
             _postmortem_prompt(
                 obs, triage.model_dump(), diagnosis_d, remediation_d,
                 approval_d, verification.model_dump(),
@@ -409,12 +397,20 @@ def run_until_approval(
         _init_db()  # idempotent, per contract
 
     obs = _prepare_observable(incident_id, chaos_config)
+    rubric = load_rubric()
     confidence, coverage_note = _compute_confidence(obs["telemetry"])
-    fallback = _fallback_model(chaos_config)
+    begin_model_run(
+        incident_id,
+        force_primary_failure=bool(
+            chaos_config and chaos_config.get("break_primary_model")
+        ),
+    )
 
     _log(run_id, "start", {"incident_id": incident_id, "chaos_config": chaos_config})
 
-    triage, diagnosis = _run_triage_diagnosis(obs, confidence, coverage_note, fallback)
+    triage, diagnosis = _run_triage_diagnosis(
+        obs, rubric, confidence, coverage_note
+    )
     _log(run_id, "triage", triage.model_dump())
     on_stage("triage", triage)
     _log(run_id, "diagnosis", diagnosis.model_dump())
@@ -422,7 +418,7 @@ def run_until_approval(
 
     plan = (
         _run_single_agent(
-            build_remediation_agent(model_id=fallback),
+            build_remediation_agent(),
             _remediation_prompt(obs, diagnosis.model_dump()),
             "A remediation plan with safe[] and risky[] actions addressing the root cause.",
             RemediationPlan,
@@ -456,7 +452,7 @@ def run_until_approval(
         _log(run_id, "approval", decision.model_dump())
         on_stage("approval", decision)
         verification, postmortem = _run_verification_postmortem(
-            run_id, obs, triage, diagnosis, plan, decision, fallback, on_stage
+            run_id, obs, triage, diagnosis, plan, decision, on_stage
         )
         _log(run_id, "complete", {"status": STATUS_RESOLVED, "recovered": verification.recovered})
         return result.model_copy(update={
@@ -488,7 +484,13 @@ def resume_after_approval(
 
     # Reconstruct the same observable the agents saw in phase 1 (pure transform).
     obs = _prepare_observable(result.incident_id, result.chaos_config)
-    fallback = _fallback_model(result.chaos_config)
+    begin_model_run(
+        result.incident_id,
+        force_primary_failure=bool(
+            result.chaos_config
+            and result.chaos_config.get("break_primary_model")
+        ),
+    )
 
     # Execute approved risky actions (simulated); skip them entirely on denial.
     if decision.approved:
@@ -496,7 +498,7 @@ def resume_after_approval(
 
     verification, postmortem = _run_verification_postmortem(
         run_id, obs, result.triage, result.diagnosis, result.remediation,
-        decision, fallback, on_stage,
+        decision, on_stage,
     )
     _log(run_id, "complete", {"status": STATUS_RESOLVED, "recovered": verification.recovered})
 

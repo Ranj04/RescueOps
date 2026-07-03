@@ -3,14 +3,31 @@
 Each function returns a fully-configured Agent. Agents are cheap to construct;
 build them fresh per run so there's no shared state between incidents.
 
-Pass model_id to override the default (used for chaos break_primary_model fallback).
+Model routing and failover are owned entirely by llm_client.
 """
 from crewai import Agent
 
-from config import build_llm
+from llm_client import build_llm
 
 
-def build_triage_agent(model_id: str | None = None) -> Agent:
+def build_commander_agent() -> Agent:
+    return Agent(
+        role="Incident Commander",
+        goal=(
+            "Choose exactly one move from the legal moves supplied by the state machine "
+            "and explain the choice in one sentence."
+        ),
+        backstory=(
+            "You coordinate incident response without inventing routes or bypassing policy. "
+            "The state machine is the authority: you may choose only from its current legal "
+            "moves, and you never treat a prompt as permission to expand that set."
+        ),
+        llm=build_llm(temperature=0.1),
+        verbose=True,
+    )
+
+
+def build_triage_agent(rubric: str) -> Agent:
     return Agent(
         role="Incident Triage Engineer",
         goal=(
@@ -20,26 +37,16 @@ def build_triage_agent(model_id: str | None = None) -> Agent:
         backstory=(
             "A senior on-call engineer with 10+ years triaging production incidents at scale. "
             "Decisive and calm under pressure. You assess customer impact quickly from partial data. "
-            "You classify severity strictly by the rubric below — never by gut feel or escalation bias. "
-            "You apply the rubric consistently so the same incident always gets the same level.\n\n"
-            "SEVERITY RUBRIC (single source of truth):\n"
-            "- SEV-1 = full outage / service down / data loss. A core dependency that is fully "
-            "unavailable (availability 0 / unreachable) AND is cascading into systemwide overload "
-            "(e.g. a downstream datastore driven toward saturation) counts as a service-down "
-            "condition — SEV-1 — even if some user-facing requests still return.\n"
-            "- SEV-2 = customer-facing degradation (elevated errors or latency, but the service is up).\n"
-            "- SEV-3 = internal-only issue, no customer impact.\n\n"
-            "Pick the single best-fitting level and state which rule you matched. Evaluate SEV-1 "
-            "first, then SEV-2, then SEV-3; choose the first level whose definition the incident "
-            "clearly satisfies. In your `reason`, name the matched rule explicitly "
-            "(e.g. \"SEV-2: customer-facing latency, service still up\")."
+            "You classify severity strictly by the supplied rubric — never by gut feel or "
+            "escalation bias. You apply it consistently so the same incident always gets "
+            f"the same level.\n\nSEVERITY RUBRIC (single source of truth):\n{rubric}"
         ),
-        llm=build_llm(model_id=model_id, temperature=0.1),
+        llm=build_llm(temperature=0.1),
         verbose=True,
     )
 
 
-def build_diagnosis_agent(model_id: str | None = None) -> Agent:
+def build_diagnosis_agent() -> Agent:
     return Agent(
         role="Site Reliability Engineer — Root Cause Analyst",
         goal=(
@@ -53,12 +60,12 @@ def build_diagnosis_agent(model_id: str | None = None) -> Agent:
             "You know that correlation + timing + multiple telemetry signals pointing the same direction "
             "is strong evidence for causation."
         ),
-        llm=build_llm(model_id=model_id),
+        llm=build_llm(),
         verbose=True,
     )
 
 
-def build_remediation_agent(model_id: str | None = None) -> Agent:
+def build_remediation_agent() -> Agent:
     return Agent(
         role="Incident Remediation Lead",
         goal=(
@@ -73,12 +80,12 @@ def build_remediation_agent(model_id: str | None = None) -> Agent:
             "to the diagnosed cause; you never suggest generic boilerplate. "
             "You name exact flags, services, and values — never generic advice."
         ),
-        llm=build_llm(model_id=model_id),
+        llm=build_llm(),
         verbose=True,
     )
 
 
-def build_verification_agent(model_id: str | None = None) -> Agent:
+def build_verification_agent() -> Agent:
     return Agent(
         role="Recovery Verification Engineer",
         goal=(
@@ -93,12 +100,12 @@ def build_verification_agent(model_id: str | None = None) -> Agent:
             "premature recovery. You are explicit that the post-remediation value is a projection "
             "over simulated telemetry, not a live re-measurement."
         ),
-        llm=build_llm(model_id=model_id),
+        llm=build_llm(),
         verbose=True,
     )
 
 
-def build_postmortem_agent(model_id: str | None = None) -> Agent:
+def build_postmortem_agent() -> Agent:
     return Agent(
         role="Incident Postmortem Writer",
         goal=(
@@ -112,6 +119,6 @@ def build_postmortem_agent(model_id: str | None = None) -> Agent:
             "Your actions_taken reflect what was actually approved and applied: safe actions always; "
             "risky only if approved. You are blameless: system failures and process gaps, not people."
         ),
-        llm=build_llm(model_id=model_id),
+        llm=build_llm(),
         verbose=True,
     )

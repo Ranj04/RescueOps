@@ -1,284 +1,256 @@
-# RescueOps
+# RescueOps HQ
 
-**A resilient, self-evaluating AI incident first responder** — built for the Capgemini AIE × CrewAI hackathon, judged on production-readiness.
+**An agent harness you can watch, test, and text.**
 
-A CrewAI crew of five specialist agents responds to a simulated production incident end-to-end — classify severity, diagnose root cause with cited evidence, propose fixes split by risk, auto-apply the safe ones, gate the destructive ones behind human approval, verify recovery, and write the postmortem — exposed through a **FastAPI** backend and a **React** console.
+A model is only the brain. RescueOps HQ builds the operating system around it:
+memory, scoped context, policy-enforced safety controls, human approval, tool access,
+observability, chaos testing, and measured evaluation.
 
-See [`KICKOFF-TRANSCRIPT.md`](KICKOFF-TRANSCRIPT.md) for the verbatim kickoff transcript (agenda, TrueFoundry/CrewAI talks, rules, judging criteria, prizes).
-See [`TRUEFOUNDRY.md`](TRUEFOUNDRY.md) for how RescueOps routes LLM calls through the TrueFoundry AI Gateway (config, failover, proof of connectivity).
-See [`CREWAI-USAGE.md`](CREWAI-USAGE.md) for how RescueOps uses CrewAI (agents, crews, structured output).
-See [`CREWAI-DOCS.md`](CREWAI-DOCS.md) for a comprehensive CrewAI reference.
+Incident response is the proving ground. An Incident Commander dispatches five
+specialists through:
 
----
+```text
+Triage → Diagnosis → Remediation → Verification → Postmortem
+```
 
-## Overview
+The Commander can make useful routing decisions, but only among legal moves defined in
+`policy.json`. Code—not a prompt—enforces the safety envelope. Illegal decisions are
+overruled and recorded.
 
-Production incidents are time-critical and cognitively overloaded. RescueOps deploys five specialist CrewAI agents that run an incident to resolution in one request/response cycle, with **progressive autonomy**: the system acts on its own when it safely can, and stops for a human only when an action is genuinely destructive.
+> [ARCHITECTURE.md](ARCHITECTURE.md) is the project contract. If this README and the
+> architecture disagree, the architecture wins.
 
-Every LLM call routes through the **TrueFoundry AI Gateway** (Grok primary; Claude and Gemini configured as fallbacks). No agent talks to a model directly — the gateway owns routing and failover. (For local development, the app also supports a direct-Anthropic mode; see [Setup](#setup).)
+## Why this project exists
 
-**The two demo moments that win this hackathon:**
+Most agent demos show a model calling a tool. RescueOps HQ makes the surrounding harness
+visible and testable:
 
-1. **Chaos injection.** A judge breaks a telemetry source (or the primary model) mid-incident from the Chaos Console. The system keeps running, but `DiagnosisReport.confidence` drops for a computed, auditable reason — fewer telemetry signals available, not an LLM guessing lower.
+- **Policy-bound autonomy:** the Commander chooses only from legal state transitions.
+- **Progressive control:** safe actions execute automatically; risky actions require a
+  human.
+- **Append-only evidence:** every agent, model, tool, human, and chaos action emits an
+  event.
+- **Graceful failure:** operators can kill telemetry or the primary model and watch the
+  system degrade or fail over.
+- **Measured quality:** labeled scenarios score severity, diagnosis, remediation, and
+  time-to-diagnosis.
+- **Domain portability:** incident knowledge lives in data packs rather than orchestration
+  code.
 
-2. **Eval dashboard.** The Eval tab runs `evaluate_all()`, scores the system against all five labeled incidents, and displays accuracy metrics. Judges see measured performance, not vibes.
+## System design
 
----
+```text
+                         RescueOps HQ
 
-## Tech Stack
+  React dashboard / Ops Floor / approval panel / chaos / eval
+                              │
+                       polls real events
+                              ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │                 EdgeOne Makers runtime                   │
+  │                                                          │
+  │  Incident Commander ── policy.json legal-move boundary   │
+  │          │                                               │
+  │          └─ Triage → Diagnosis → Remediation             │
+  │                                  │                       │
+  │                         risky action?                     │
+  │                         yes ──► human gate                │
+  │                                  │                       │
+  │                         Verification → Postmortem         │
+  │                                                          │
+  │  Every model call ──► Makers model gateway               │
+  │  Paused state     ──► Makers session store               │
+  │  Events/evals     ──► Makers KV/Blob                     │
+  │  Agent/tool work  ──► Makers tracing                     │
+  └──────────────────────────────────────────────────────────┘
+```
 
-| Layer | Technology |
+The dashboard, audit view, eval harness, and animated Ops Floor are consumers of the same
+event stream. UI state must never be invented independently from pipeline activity.
+
+## Safety model
+
+The default policy gives the Commander four decision points:
+
+1. After triage: fast-path a SEV-3 incident or dispatch deep diagnosis.
+2. After diagnosis: dispatch remediation or escalate low-confidence findings.
+3. After risky remediation: request approval; code makes this transition mandatory.
+4. After failed verification: retry once or escalate, subject to the configured cap.
+
+`run_until_approval()` and `resume_after_approval()` keep human wait time outside an HTTP
+request. A paused incident can therefore survive a serverless boundary and resume after a
+web or SMS decision.
+
+## Event stream
+
+Every meaningful action follows one envelope:
+
+```json
+{
+  "seq": 41,
+  "ts": "2026-07-03T21:04:11Z",
+  "incident_id": "INC-3",
+  "actor": "commander",
+  "type": "commander_decision",
+  "payload": {
+    "summary": "Diagnosis confidence is high; dispatching remediation."
+  },
+  "trace_id": null
+}
+```
+
+Events are ordered per incident. `payload.summary` is always a human-readable sentence
+because it also becomes the Ops Floor speech bubble.
+
+## Domain packs
+
+Domain knowledge is data, not orchestration code:
+
+```text
+packs/
+└── it-ops/
+    ├── scenarios.json   # five labeled incidents and ground truth
+    └── rubric.md        # severity definitions injected into triage
+```
+
+The planned complete pack contract also includes `playbook.json`, `tools.py`, and
+`floor.json`. Security operations and supply-chain response are stretch packs after the
+core IT-ops path is green.
+
+Agents receive only observable incident data. `ground_truth` is reserved for the eval
+harness and is never included in an agent prompt.
+
+## EdgeOne Makers usage
+
+| Makers capability | RescueOps responsibility |
 |---|---|
-| **Frontend** | React 18 + Vite 5 (vanilla JSX, no UI framework) |
-| **Backend / API** | FastAPI + Uvicorn (request/response JSON API under `/api`) |
-| **Agents** | CrewAI (`Process.sequential` crews) + LiteLLM |
-| **LLM routing** | TrueFoundry AI Gateway (Grok primary → Claude / Gemini fallbacks); direct-Anthropic mode for local dev |
-| **Observability** | Traceloop SDK → TrueFoundry tracing (best-effort, never blocks a run) |
-| **Persistence** | SQLite (`rescueops_audit.db`) — audit event log + eval results |
-| **Data** | `incidents.json` — 5 synthetic labeled incidents; no real cloud integrations |
-| **Voice (optional)** | xAI Grok TTS with macOS `say` fallback (`voice.py`) |
-| **Packaging / deploy** | Single Docker image (multi-stage: Vite build → Python runtime); Railway / Procfile |
+| Agent runtime | Host the Commander and specialist crew |
+| Model gateway | Route every LLM call, with primary/fallback handling |
+| Session store | Persist paused approval state |
+| KV / Blob | Store append-only events, incidents, and eval results |
+| Sandboxed tools | Execute remediation actions with bounded access |
+| Built-in tracing | Link agent/model/tool events to platform traces |
+| Cloud functions | Expose incidents, events, approvals, chaos, eval, and SMS |
+| Static hosting | Serve the React dashboard and Ops Floor |
 
-The whole app ships as **one container, one URL, no CORS**: FastAPI serves the JSON API under `/api` and the built React bundle (`frontend/dist`) at `/`.
+No platform capability is claimed in the demo until it has observable production
+evidence.
 
----
+## Current build status
 
-## Architecture
+This repository is being migrated from an earlier RescueOps prototype. The target
+architecture above is not yet fully shipped.
 
-```
-        ┌──────────────────────────────────────────────────────────┐
-        │                   React + Vite SPA (frontend/)            │
-        │   Incident Picker │ Chaos Console │ Timeline │ Eval Tab   │
-        └───────────────┬───────────────────────────┬──────────────┘
-                        │ fetch /api/...             │ Approve / Deny
-                        ▼                            ▼
-        ┌──────────────────────────────────────────────────────────┐
-        │              FastAPI backend (api/server.py)              │
-        │   POST /api/runs              → run to approval/resolved  │
-        │   POST /api/runs/{id}/approve → resume to resolved        │
-        │   GET/POST /api/eval, /api/incidents, /api/health         │
-        │   In-memory run-state keyed by run_id                     │
-        └───────────────┬──────────────────────────────────────────┘
-                        │
-                        ▼
-        ┌──────────────────────────────────────────────────────────┐
-        │                  pipeline.py  (two phases)                │
-        │                                                          │
-        │  run_until_approval(incident_id, chaos_config)           │
-        │    └─ chaos.apply_chaos()  ◄─ degrade observable first   │
-        │    └─ _compute_confidence()◄─ deterministic, not LLM     │
-        │    └─ [1] Triage  → [2] Diagnosis  (one seq. crew)       │
-        │    └─ [3] Remediation → safe[] + risky[]                  │
-        │    └─ auto-execute every safe action  (the autonomy)     │
-        │         ├─ risky[] empty  → resolve autonomously ──┐     │
-        │         └─ risky[] present→ status=awaiting_approval│     │
-        │                                                    │     │
-        │  resume_after_approval(result, decision) ◄─ human ─┘     │
-        │    └─ execute approved risky actions                     │
-        │    └─ [4] Verification → [5] Postmortem                   │
-        │                                                          │
-        │  All agents: config.build_llm() → TrueFoundry Gateway    │
-        └───────────────┬──────────────────────────────────────────┘
-                        │ per-stage
-                        ▼
-        ┌─────────────────────────────┐   ┌──────────────────────────┐
-        │   audit.log_event()         │   │  evaluation.evaluate_all()│
-        │   SQLite: events            │   │  scores vs ground_truth   │
-        │   every stage written       │   │  (eval harness only)      │
-        └─────────────────────────────┘   └──────────────────────────┘
-```
+| Area | Status |
+|---|---|
+| Track A repository audit | Complete |
+| IT-ops scenarios and rubric extracted into a pack | Complete |
+| Central `llm_client.py` boundary | Complete |
+| Makers primary/fallback adapter and fallback event | Implemented; live credential gate pending |
+| Commander factory and `policy.json` state-machine core | Offline implementation tested; live pipeline wiring pending |
+| Event envelope, validation, and gapless local sequencing | Implemented; complete pipeline emission and KV write path pending |
+| Makers session/KV persistence | Pending Track B recon and integration |
+| Production dashboard integration | Pending |
+| SMS, Ops Floor, sec-ops pack | Stretch; not yet shipped |
 
-### Two-phase request/response
+Legacy TrueFoundry, Traceloop, SQLite, Railway, Streamlit, and nested CrewAI scaffold
+files remain from the prior prototype. They are not the target architecture and will be
+removed or replaced only in their gated migration phases.
 
-The backend never blocks an HTTP request on a human. The pipeline is split so a run can pause cleanly between requests:
-
-- **`POST /api/runs`** → `run_until_approval()` runs triage → diagnosis → remediation, **auto-executes every safe action**, then either:
-  - **resolves autonomously** (`status: "resolved"`) when remediation produced no risky actions — verification + postmortem run in the same response; or
-  - **pauses** (`status: "awaiting_approval"`) with the pending risky actions surfaced. The `RunResult` is held in memory keyed by `run_id`.
-- **`POST /api/runs/{run_id}/approve`** → `resume_after_approval()` applies the human decision, executes approved risky actions, then runs verification → postmortem and returns the resolved `RunResult`.
-
-A server restart loses in-flight (paused) runs but never the recorded history — every stage is written to SQLite as it happens.
-
----
-
-## Repo Map
+## Repository map
 
 | Path | Purpose |
 |---|---|
-| **Backend / pipeline** | |
-| `api/server.py` | FastAPI app — `/api` routes + serves the built React bundle at `/` |
-| `pipeline.py` | `run_until_approval()`, `resume_after_approval()`, `run_incident()` — orchestrates the crews with progressive autonomy |
-| `agents.py` | The 5 CrewAI agent factories (triage, diagnosis, remediation, verification, postmortem) |
-| `schemas.py` | All Pydantic artifact types — the integration contract (`RunResult`, etc.) |
-| `config.py` | `build_llm()` — routes every agent through TrueFoundry (or direct Anthropic); initializes tracing |
-| `incidents.py` / `incidents.json` | `load_incidents()`, `get_incident()`, `observable()` + 5 labeled incidents |
-| `audit.py` | SQLite event log — `init_db`, `log_event`, `get_run` |
-| `chaos.py` | `apply_chaos()` — degrades the observable before any agent sees it |
-| `evaluation.py` | `evaluate_all()`, `get_latest_eval()` — scores all 5 incidents vs `ground_truth` |
-| `voice.py` | Optional spoken approval prompt (xAI TTS → macOS `say` fallback) |
-| `main.py` | CLI runner — `python main.py --incident <id> [--auto-approve]` |
-| **Frontend** | |
-| `frontend/src/App.jsx` | Top-level React app — pipeline lifecycle (`idle → running → awaiting_approval → resuming → done`) |
-| `frontend/src/components.jsx` | Panels: incident picker, chaos console, artifact panels, approval bar, eval dashboard |
-| `frontend/src/api.js` | Thin `fetch` wrapper over the `/api` backend |
-| `frontend/vite.config.js` | Vite dev server; proxies `/api` → `:8000` |
-| **Deploy** | |
-| `Dockerfile` | Multi-stage: build React → Python runtime serving both |
-| `dev.sh` | Run backend (`:8000`) + Vite dev server (`:5173`) together |
-| `railway.json` / `Procfile` | Railway / PaaS single-service deploy config |
-| `requirements.txt` | Python dependencies |
-| `.env.example` | Gateway URL, API key, model IDs (copy to `.env`) |
+| `ARCHITECTURE.md` | Single source of truth and cross-track contract |
+| `CLAUDE.md` | Implementation principles, gates, and hard rules |
+| `TRACK-A.md` | Agents and model-layer execution plan |
+| `TRACK-B.md` | Makers platform and frontend execution plan |
+| `DEMO-SCRIPT.md` | Three-minute demo beats and fallback plan |
+| `agents.py` | Current five specialist Agent factories |
+| `pipeline.py` | Progressive-autonomy pipeline |
+| `llm_client.py` | Single Makers gateway model boundary |
+| `events.py` | Track A event production helper |
+| `schemas.py` | Structured Pydantic artifacts |
+| `packs/it-ops/` | IT-ops scenarios and severity rubric |
+| `api/` | Current FastAPI surface; Track B migration area |
+| `frontend/` | Current React interface; Track B migration area |
+| `tests/` | Track A refactor and model-failover tests |
 
-> `app.py` (Streamlit) and the `rescueops/` package are earlier prototypes retained for reference; the live demo is the React + FastAPI stack above.
+## Local setup
 
----
-
-## Progressive Autonomy
-
-The core behavior after remediation produces `safe[]` and `risky[]`:
-
-1. **Every safe action auto-executes** — no human in the loop. That's the autonomy. ("Executing" is simulated: actions are recorded to the audit trail, since there are no real cloud integrations.)
-2. **If `risky[]` is empty** → continue straight to verification + postmortem and return a **resolved** result with no pause. Fully autonomous.
-3. **If `risky[]` is non-empty** → stop and surface those actions for a human approve/deny decision. That's the governance.
-
-`RunResult.status` is `"awaiting_approval"` or `"resolved"`; `executed_safe` lists the safe actions already applied. The remediation agent is explicitly instructed never to manufacture risky actions to look thorough — so the autonomous path is the common case, and the human gate fires only when a fix genuinely requires a destructive step.
-
----
-
-## API Reference
-
-All routes are prefixed `/api`.
-
-| Method & path | Purpose |
-|---|---|
-| `GET /api/health` | Liveness probe |
-| `GET /api/incidents` | Selectable incidents (never exposes `ground_truth`) |
-| `POST /api/runs` | Run to approval; auto-executes safe actions. Returns `resolved` (no risky) or `awaiting_approval` |
-| `POST /api/runs/{run_id}/approve` | Apply the human decision, then verify → postmortem; returns resolved `RunResult` |
-| `GET /api/runs/{run_id}` | Fetch the current `RunResult` for a run |
-| `GET /api/eval` | Latest persisted eval summary (or `null`) |
-| `POST /api/eval` | Run `evaluate_all()` over all 5 incidents; persist + return the summary |
-
-`POST /api/runs` body: `{ "incident_id": str, "chaos_config": { "disable_sources": [...], "break_primary_model": bool } | null }`.
-`POST /api/runs/{id}/approve` body: `{ "approved": bool, "approver": str, "note": str }`.
-
----
-
-## Confidence vs Evaluation
-
-These two concepts are **intentionally separate**. Conflating them would mislead judges about system integrity.
-
-### Runtime confidence (`DiagnosisReport.confidence`)
-
-- Computed **by the pipeline** (`_compute_confidence` in `pipeline.py`), not by the agent's LLM.
-- Computed **from the observable only** — the same data slice the agents see.
-- Formula: start at `1.0`, subtract a fixed weight per missing/disabled telemetry source:
-
-  | Source disabled | Weight |
-  |---|---|
-  | `logs` | −0.30 |
-  | `metrics` | −0.40 |
-  | `deploys` | −0.20 |
-
-- Floor `0.10`; when a judge disables a source, confidence drops mechanically and auditably. **The agent never outputs a confidence number** — the pipeline overrides whatever the LLM returns with the deterministic value.
-
-### Eval-time scoring (`evaluation.py`)
-
-- **Only the eval harness reads `ground_truth`.** Agents, the pipeline, chaos, and the UI never see it (enforced by `incidents.observable()`).
-- `severity_correct` = `triage.severity == ground_truth.severity`.
-- `evidence_recall` / `remediation_overlap` = fraction of expected items each covered by a produced item, via a directional fuzzy word-coverage matcher (handles short canonical labels vs verbose produced text).
-
-**If a judge asks:** confidence is a real-time signal from telemetry availability; eval accuracy is a post-hoc measurement against labeled ground truth. They measure different things.
-
----
-
-## Setup
-
-### Requirements
+Requirements:
 
 - Python 3.12
-- Node 20 (for the React frontend)
-- TrueFoundry AI Gateway access (URL + API key) — *or* an `ANTHROPIC_API_KEY` for local direct mode
+- Node.js 20
+- EdgeOne Makers model-gateway credentials
 
-### Environment
-
-Copy `.env.example` to `.env` and fill in your values:
-
-```
-# TrueFoundry gateway mode (production)
-TFY_GATEWAY_BASE_URL=https://<your-gateway>.truefoundry.cloud/api/llm
-TFY_API_KEY=<your-api-key>
-GROK_MODEL_ID=<grok-model-id-as-aliased-in-gateway>
-CLAUDE_MODEL_ID=<claude-model-id-as-aliased-in-gateway>
-GEMINI_MODEL_ID=<gemini-model-id-as-aliased-in-gateway>
-```
-
-Model IDs must match the aliases configured in the TrueFoundry gateway, not raw vendor IDs. For local development, set `ANTHROPIC_API_KEY` instead and leave the gateway URL as the placeholder — `build_llm()` auto-detects the mode.
-
-### Run locally (dev)
+Create the environment:
 
 ```bash
-# Backend + frontend together (backend :8000, Vite :5173, /api proxied):
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+cp .env.template .env
+```
+
+Configure `.env` with values from the Makers console:
+
+```env
+LLM_BASE_URL=<OpenAI-compatible gateway URL>
+MAKERS_MODELS_KEY=<secret>
+LLM_PRIMARY_MODEL=@makers/deepseek-v4-flash
+LLM_FALLBACK_MODEL=<bound fallback model ID>
+```
+
+Never commit `.env` or paste the key into an issue, log, or chat.
+
+Run the current backend and frontend:
+
+```bash
 ./dev.sh
 ```
 
-Or run each side manually:
+Or run them separately:
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn api.server:app --reload --port 8000      # backend
+uvicorn api.server:app --reload --port 8000
 
-cd frontend && npm install && npm run dev          # frontend on :5173
+cd frontend
+npm install
+npm run dev
 ```
 
-Open the Vite dev server (http://localhost:5173) — it proxies `/api` to the backend.
-
-### CLI (no UI)
+Run tests:
 
 ```bash
-python main.py --incident INC-001-checkout-db-pool   # interactive approval
-python main.py --incident INC-003-redis-cache-outage --auto-approve
+python3 -m pytest -q
 ```
 
-### Production / single-service
+## Two-track development
 
-```bash
-docker build -t rescueops .
-docker run -p 8000:8000 --env-file .env rescueops
-# FastAPI serves the API at /api and the built React app at /
-```
+Work is deliberately split across disjoint ownership:
 
-`railway.json` and `Procfile` deploy the same image on Railway (health check at `/api/health`).
+- **Track A — agents and model layer:** specialists, Commander, state machine, model
+  client, schemas, pack content, and event production.
+- **Track B — platform and surface:** Makers deployment, cloud functions, storage,
+  chaos/evaluation wiring, frontend, event consumption, SMS, and Ops Floor.
 
----
+Both tracks work phase-by-phase. Each phase ends with automated verification and,
+where specified, a human gate. Core integration happens only after the real event
+producer and production event consumer are independently green.
 
-## Demo Script
+## Demo thesis
 
-**Beat 1 — Live incident**
-Open the React console. Pick `INC-001-checkout-db-pool`, click **Run incident**. The timeline fills in: `TriageReport` → `DiagnosisReport` (confidence `1.0`, evidence cited) → `RemediationPlan` (safe actions auto-applied, risky flagged).
+Everyone can deploy an agent. RescueOps HQ demonstrates whether that agent can be
+trusted:
 
-**Beat 2 — Progressive autonomy + approval gate**
-- If remediation produced **no risky action**, the run **resolves autonomously** — verification and postmortem appear with no human gate. Point out: the system acted on its own because every fix was safe.
-- If there's a risky action (e.g. "Roll back deploy checkout-v42"), the UI pauses at the **approval bar**. Click **Approve** or **Deny**. The pipeline resumes: `VerificationReport` shows the recovery metric vs threshold; `PostmortemReport` appears.
+1. Open a real incident.
+2. Watch the Commander dispatch specialists under a visible policy.
+3. Kill a telemetry source or primary model.
+4. Inspect the resulting fallback and degradation events.
+5. Pause on a risky fix and approve it from the web or phone.
+6. Show measured results against labeled ground truth.
+7. Follow an event into its Makers trace.
 
-**Beat 3 — Chaos injection**
-Open the **Chaos Console**, disable `metrics`, re-run the incident. `DiagnosisReport.confidence` drops (e.g. to `0.60`) and the UI shows it — a computed drop, not an LLM guess. Optionally enable `break_primary_model`: the gateway routes to the Claude fallback, visible in TrueFoundry traces.
-
-**Beat 4 — Eval dashboard**
-Switch to the **Eval** tab, click **Run evaluation**. `evaluate_all()` scores all 5 incidents; the table shows per-incident severity accuracy, evidence recall, remediation overlap, recovery rate, plus aggregates.
-
----
-
-## Hard Constraints
-
-| Constraint | Rationale |
-|---|---|
-| No real cloud integrations | All data synthetic (`incidents.json`); action execution is simulated/audited |
-| No custom model router | TrueFoundry gateway owns fallback logic; we only call `build_llm()` |
-| SQLite, not ClickHouse/Postgres | One file, zero infra, runs anywhere |
-| `Process.sequential` crews | No parallel agents, no subcrews — deterministic stage order |
-| No auth or user registry | Demo-only; single-user session |
-| Agents never see `ground_truth` | Enforced by `incidents.observable()` — agents get only `alert` + `telemetry` |
-| Confidence computed, not inferred | The pipeline fills `DiagnosisReport.confidence`; no LLM decides the number |
-| Backend never blocks on a human | Two-phase request/response; run-state held in memory keyed by `run_id` |
+The harness—not the chat box—is the product.

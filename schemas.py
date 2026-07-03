@@ -18,6 +18,14 @@ class TriageReport(BaseModel):
     reason: str = Field(description="Why this severity and routing")
 
 
+class CommanderDecision(BaseModel):
+    move: str = Field(description="One of the legal moves supplied by the state machine")
+    rationale: str = Field(
+        min_length=1,
+        description="One human-readable sentence explaining the move",
+    )
+
+
 class DiagnosisReport(BaseModel):
     root_cause: str = Field(description="One-sentence root-cause statement")
     cited_evidence: list[str] = Field(description="Telemetry keys / values that support the diagnosis")
