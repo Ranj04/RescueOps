@@ -157,6 +157,17 @@ Legacy TrueFoundry, Traceloop, SQLite, Railway, Streamlit, and nested CrewAI sca
 files remain from the prior prototype. They are not the target architecture and will be
 removed or replaced only in their gated migration phases.
 
+## Measured results
+
+`evaluation.py` runs all five labeled incidents through the full pipeline, with the harness approving risky actions and no chaos injected, and scores each result against ground truth. Last recorded run, on the pipeline as of commit 90fe5f3 (Jun 16, 2026, before the Makers migration):
+
+| Metric | Score |
+|---|---|
+| Recovery rate | 1.0 (5 of 5 incidents recovered) |
+| Severity accuracy | 1.0 |
+| Evidence recall | 1.0 |
+| Remediation overlap | 0.643 (0.33 to 0.80 per incident) |
+
 ## Repository map
 
 | Path | Purpose |
